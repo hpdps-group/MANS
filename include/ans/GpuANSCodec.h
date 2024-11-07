@@ -12,7 +12,6 @@
 #include <assert.h>
 #include "utils/DeviceUtils.h"
 #include "utils/StaticUtils.h"
-//#include "utils/StackDeviceMemory.h"
 
 namespace multibyte_ans {
 
@@ -224,8 +223,7 @@ getRawCompBlockMaxSize(uint32_t uncompressedBlockBytes) {
   // (an estimate from zstd)
   return roundUp(
       uncompressedBlockBytes + (uncompressedBlockBytes / 4), kBlockAlignment);//kBlockAlignment = 16，内存对齐需求
-}//roundUp 函数，它将一个数值向上取整到最接近的指定倍数，参考ZSTD压缩器进行最大内存占用分析
-
+}
 
 inline uint32_t getMaxBlockSizeUnCoalesced(uint32_t uncompressedBlockBytes) {//计算未对齐（uncoalesced）数据的最大块大小。
   // uncoalesced data has a warp state header

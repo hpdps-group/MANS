@@ -40,14 +40,11 @@ __global__ void batchExclusivePrefixSum1(
 
   int batchIdx = block * Threads + tid;
   bool valid = batchIdx < maxNumCompressedBlocks;
-  //一个线程对应一个虚拟block
   int totalIdx = batch * maxNumCompressedBlocks + batchIdx;
   auto v = valid ? fn(in[totalIdx]) : T(0);
 
   using Scan = cub::BlockScan<T, Threads>;
   __shared__ typename Scan::TempStorage smem;
-  //__shared__ 关键字表示这个变量存储在GPU的共享内存中，
-  //所有同一个线程块内的线程都可以访问。
   T prefix = 0;
   T total = 0;
   Scan(smem).ExclusiveSum(v, prefix, total);
@@ -190,6 +187,6 @@ void batchExclusivePrefixSum(
 #undef BPS_LEVEL_1
 }
 
-} // namespace dietgpu
+} 
 
 #endif // MULTIBYTE_ANS_ANS_BATCHPREFIXSUM_H

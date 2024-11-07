@@ -7,7 +7,6 @@
 #include "ans/GpuANSEncode.h"
 #include "ans/GpuANSDecode.h"
 #include "ans/GpuANSCodec.h"
-//#include "utils/StackDeviceMemory.h"
 #include <cmath>
 #include <memory>
 #include <vector>

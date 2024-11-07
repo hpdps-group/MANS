@@ -467,6 +467,6 @@ inline void ansCalcWeights(
       histogram_dev, inSize_dev, probBits, table_dev);
 }
 
-} // namespace dietgpu
+} // namespace
 
 #endif

@@ -52,10 +52,6 @@ __device__ __forceinline__ uint32_t encodeOne(
   }
 
   uint32_t t = __umulhi(state, div_m1);
-  //__umulhi 通常是一个内联汇编函数或者内置函数，
-  //用于计算两个无符号整数相乘的结果，并且只返回乘积的高半部分（即更显著的位）。
-  //这种操作在某些低级编程或者性能敏感的代码中很有用，
-  //因为它可以避免处理整个乘积，从而节省空间和时间。
   
   // We prevent addition overflow here by restricting `state` to < 2^31
   // (kANSStateBits)
@@ -90,7 +86,7 @@ __device__ void ansEncodeBlocks(
     const uint4* table_dev) {
   // grid-wide warp id
   int tid = threadIdx.x;
-  int grim_warp_numid =//这个grim_warp_numid指的是一个grim中的全局warpid
+  int grim_warp_numid =
       __shfl_sync(0xffffffff, (blockIdx.x * blockDim.x + tid) / kWarpSize, 0);
   int laneId = getLaneId();
 
@@ -461,7 +457,7 @@ void ansEncode(
   CUDA_TEST_ERROR();
 }
 
-} // namespace dietgpu
+} // namespace 
 
 #undef RUN_ENCODE_ALL
 

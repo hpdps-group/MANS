@@ -452,6 +452,6 @@ void ansDecode(
   CUDA_TEST_ERROR();
 }
 
-} // namespace dietgpu
+} // namespace 
 
 #endif
