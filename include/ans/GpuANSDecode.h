@@ -447,8 +447,6 @@ void ansDecode(
 #undef RUN_DECODE
   }
 
-  //ANSDecodeStatus status;
-
   CUDA_TEST_ERROR();
 }
 

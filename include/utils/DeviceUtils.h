@@ -429,6 +429,6 @@ CudaStream CudaStream::makeNonBlocking() {
   return CudaStream(cudaStreamNonBlocking);
 }
 
-} // namespace dietgpu
+} // namespace
 
 #endif 

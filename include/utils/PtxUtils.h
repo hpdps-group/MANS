@@ -58,6 +58,6 @@ __device__ inline T warpReduceAllSum(T val) {
 #endif
 }
 
-} // namespace dietgpu
+} // namespace
 
 #endif // MULTIBYTE_ANS_INCLUDE_UTILS_PTXUTILS_H_
