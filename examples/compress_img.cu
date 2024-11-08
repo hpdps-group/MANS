@@ -141,7 +141,7 @@ int main(int argc, char* argv[]) {
         compressedSize,//压缩后的数据大小
         precision,//ANS的精度
         stream);
-    printf("compress ratio: %f\n", 1.0 * compressedSize / batchSize);
+    printf("compress ratio: %f\n", 1.0 * batchSize / compressedSize);
 	decompressFileWithANS(
         argv[2],argv[3],
         batchSize,//原本的数据规模
