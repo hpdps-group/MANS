@@ -104,7 +104,6 @@ __global__ void batchExclusivePrefixSum3(
 }
 
 inline size_t getBatchExclusivePrefixSumTempSize(
-    uint32_t numInBatch,
     uint32_t maxNumCompressedBlocks) {
   if (maxNumCompressedBlocks <= kMaxBEPSThreads) {
     return 0;

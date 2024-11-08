@@ -52,6 +52,10 @@ __device__ __forceinline__ uint32_t encodeOne(
   }
 
   uint32_t t = __umulhi(state, div_m1);
+  //__umulhi 通常是一个内联汇编函数或者内置函数，
+  //用于计算两个无符号整数相乘的结果，并且只返回乘积的高半部分（即更显著的位）。
+  //这种操作在某些低级编程或者性能敏感的代码中很有用，
+  //因为它可以避免处理整个乘积，从而节省空间和时间。
   
   // We prevent addition overflow here by restricting `state` to < 2^31
   // (kANSStateBits)
@@ -69,24 +73,18 @@ __device__ __forceinline__ uint32_t encodeOne(
 }
 
 template <int ProbBits, int BlockSize>
-__device__ void ansEncodeBlocks(
-    // input data for all blocks
+__global__ void ansEncodeBatch(
     uint8_t* in_dev,
-    // length in ANSDecodedT words
-    uint32_t inSize_dev,
-    // number of blocks that different warps will process
-    uint32_t numBlocks,
-    // the stride of each encoded output block
+    int inSize_dev,
+    uint32_t maxNumCompressedBlocks,
     uint32_t uncoalescedBlockStride,
-    // address of the output for all blocks
     uint8_t* compressedBlocks_dev,
-    // output array of per-block sizes of number of ANSEncodedT words per block
     uint32_t* compressedWords_dev,
-    // the encoding table that we will load into smem
     const uint4* table_dev) {
+  uint32_t numBlocks = (inSize_dev + BlockSize - 1) / BlockSize;
   // grid-wide warp id
   int tid = threadIdx.x;
-  int grim_warp_numid =
+  int grim_warp_numid =//这个grim_warp_numid指的是一个grim中的全局warpid
       __shfl_sync(0xffffffff, (blockIdx.x * blockDim.x + tid) / kWarpSize, 0);
   int laneId = getLaneId();
 
@@ -102,6 +100,7 @@ __device__ void ansEncodeBlocks(
   if(start >= inSize_dev){
     return;
   }
+
   auto blockSize =  min(start + BlockSize, inSize_dev) - start;
 
   // Either the warp is an excess one, or the last block is not a full block and
@@ -117,6 +116,7 @@ __device__ void ansEncodeBlocks(
   assert(isPointerAligned(inBlock, kANSRequiredAlignment));
 
   ANSEncodedT* outWords = (ANSEncodedT*)(outBlock + 1);
+
 
   ANSStateT state = kANSStartState;
 
@@ -136,6 +136,7 @@ __device__ void ansEncodeBlocks(
       }
     }
   }
+
   
   if (limit != blockSize) {
     limit = roundDown(blockSize, kWarpSize);
@@ -162,28 +163,6 @@ __device__ void ansEncodeBlocks(
   }
 }
 
-template <int ProbBits, int BlockSize>
-__global__ void ansEncodeBatch(
-    uint8_t* in_dev,
-    int inSize_dev,
-    uint32_t maxNumCompressedBlocks,
-    uint32_t uncoalescedBlockStride,
-    uint8_t* compressedBlocks_dev,
-    uint32_t* compressedWords_dev,
-    const uint4* table_dev) {
-  uint32_t numBlocks = (inSize_dev + BlockSize - 1) / BlockSize;
-
-  ansEncodeBlocks<ProbBits, BlockSize>(
-      in_dev,
-      inSize_dev,
-      numBlocks,
-      uncoalescedBlockStride,
-      compressedBlocks_dev,
-      compressedWords_dev,
-      table_dev
-      );
-}
-
 template <typename A, int B>
 struct Align {
   typedef uint32_t argument_type;
@@ -199,17 +178,21 @@ struct Align {
 };
 
 template <int Threads>
-__device__ void ansEncodeCoalesce(
+__global__ void ansEncodeCoalesceBatch(
     const uint8_t* __restrict__ compressedBlocks_dev,
+    // uint8_t* in_dev,
+    int uncompressedWords,// inSize_dev,
+    uint32_t maxNumCompressedBlocks,
     uint32_t uncoalescedBlockStride,
     const uint32_t* __restrict__ compressedWords_dev,
     const uint32_t* __restrict__ compressedWordsPrefix_dev,
     const uint4* __restrict__ table_dev,
     uint32_t config_probBits,
-    uint32_t numBlocks,
-    uint32_t uncompressedWords,
     uint8_t* out_dev,
     uint32_t* outSize_dev) {
+
+  auto numBlocks = divUp(uncompressedWords, kDefaultBlockSize);
+
   int block = blockIdx.x;
   int tid = threadIdx.x;
 
@@ -235,6 +218,8 @@ __device__ void ansEncodeCoalesce(
       header.setTotalUncompressedWords(uncompressedWords);
       header.setTotalCompressedWords(totalCompressedWords);
       header.setProbBits(config_probBits);
+      if(tid == 0 && blockIdx.x == 0)
+      printf("header.setProbBits(config_probBits): %d\n",header.getProbBits());
 
       if (outSize_dev) {
         *outSize_dev = header.getTotalCompressedSize();
@@ -298,35 +283,6 @@ __device__ void ansEncodeCoalesce(
   }
 }
 
-template <int Threads>
-__global__ void ansEncodeCoalesceBatch(
-    const uint8_t* __restrict__ compressedBlocks_dev,
-    uint8_t* in_dev,
-    int inSize_dev,
-    uint32_t maxNumCompressedBlocks,
-    uint32_t uncoalescedBlockStride,
-    const uint32_t* __restrict__ compressedWords_dev,
-    const uint32_t* __restrict__ compressedWordsPrefix_dev,
-    const uint4* __restrict__ table_dev,
-    uint32_t config_probBits,
-    uint8_t* out_dev,
-    uint32_t* outSize_dev) {
-
-  auto numBlocks = divUp(inSize_dev, kDefaultBlockSize);
-
-  ansEncodeCoalesce<Threads>(
-      compressedBlocks_dev,
-      uncoalescedBlockStride,
-      compressedWords_dev,
-      compressedWordsPrefix_dev,
-      table_dev,
-      config_probBits,
-      numBlocks,
-      inSize_dev,
-      out_dev,
-      outSize_dev);
-}
-
 void ansEncode(
     int precision,
     uint8_t* in,
@@ -342,21 +298,21 @@ void ansEncode(
   uint4* table_dev;
   CUDA_VERIFY(cudaMalloc(&table_dev, sizeof(uint4) * kNumSymbols));
 
-    uint32_t* tempHistogram_dev;
-    CUDA_VERIFY(cudaMalloc(&tempHistogram_dev, sizeof(uint32_t) * kNumSymbols));
+  uint32_t* tempHistogram_dev;
+  CUDA_VERIFY(cudaMalloc(&tempHistogram_dev, sizeof(uint32_t) * kNumSymbols));
 
-    ansHistogramBatch(
+  ansHistogramBatch(
       in,
       inSize,
       tempHistogram_dev, 
       stream);
 
-    ansCalcWeights(
-        precision,
-        inSize,
-        tempHistogram_dev,
-        table_dev,
-        stream);
+  ansCalcWeights(
+      precision,
+      inSize,
+      tempHistogram_dev,
+      table_dev,
+      stream);
   
   uint32_t uncoalescedBlockStride =
       getMaxBlockSizeUnCoalesced(kDefaultBlockSize);
@@ -409,28 +365,16 @@ void ansEncode(
   if (maxNumCompressedBlocks > 0) {
     auto sizeRequired =
         getBatchExclusivePrefixSumTempSize(
-          1, 
           maxNumCompressedBlocks);
-
-    if (sizeRequired == 0) {
-      batchExclusivePrefixSum<uint32_t, Align<ANSEncodedT, kBlockAlignment>>(
-          compressedWords_dev,
-          compressedWordsPrefix_dev,
-          nullptr,
-          maxNumCompressedBlocks,
-          Align<ANSEncodedT, kBlockAlignment>(),
-          stream);
-    } else {
-      uint8_t* tempPrefixSum_dev;
-      CUDA_VERIFY(cudaMalloc(&tempPrefixSum_dev, sizeof(uint8_t) * sizeRequired));
-      batchExclusivePrefixSum<uint32_t, Align<ANSEncodedT, kBlockAlignment>>(
-          compressedWords_dev,
-          compressedWordsPrefix_dev,
-          tempPrefixSum_dev,
-          maxNumCompressedBlocks,
-          Align<ANSEncodedT, kBlockAlignment>(),
-          stream);
-    }
+    uint8_t* tempPrefixSum_dev = nullptr;
+    CUDA_VERIFY(cudaMalloc(&tempPrefixSum_dev, sizeof(uint8_t) * sizeRequired));
+    batchExclusivePrefixSum<uint32_t, Align<ANSEncodedT, kBlockAlignment>>(
+        compressedWords_dev,
+        compressedWordsPrefix_dev,
+        tempPrefixSum_dev,
+        maxNumCompressedBlocks,
+        Align<ANSEncodedT, kBlockAlignment>(),
+        stream);
   }
   
   {
@@ -441,7 +385,6 @@ void ansEncode(
     kThreads>
         <<<grid, kThreads, 0, stream>>>(
             compressedBlocks_dev,
-            in,
             inSize,
             maxNumCompressedBlocks,
             uncoalescedBlockStride,
