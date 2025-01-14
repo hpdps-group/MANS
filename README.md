@@ -1,6 +1,6 @@
-# Multibyte-ANS
+# MANS: Optimizing ANS Encoding for Multi-Byte Integer Data on the GPU
 
-Multibyte-ANS is a universal byte-range-based ANS (Asymmetric Numeral Systems) entropy encoder and decoder, which can operate at approximately 50-150 GB/s throughput for reasonable data sizes on the MI100/MI210 GPU. It is the GPU version of Yann Collet's [FSE (Finite State Entropy)](https://github.com/Cyan4973/FiniteStateEntropy) ANS library. Currently, the API is only available in C++ (using raw device pointers).
+MANS is a GPU-based ANS compressor for multi-byte integer data, which achieves high compression ratios and high throughput on small multi-byte integer datasets. The core concept of MANS is the ADM kernel(adapative data mapping). We evaluate the performance of MANS using six integer datasets on an A100 GPU. Results demonstrate that MANS achieves compression ratios that are 1.17$\times$ to 2.23$\times$ higher than the original ANS. At the same time,  MANS achieves compression ratios up to 1.92$\times$ higher than state-of-the-art optimized ANS(ADT-FSE).
 
 ## Building
 
