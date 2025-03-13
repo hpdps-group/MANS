@@ -1,6 +1,8 @@
-# MANS: Optimizing ANS Encoding for Multi-Byte Integer Data on the NVIDIA GPUs
+# MANS: Optimizing ANS Encoding for Multi-Byte Integer Data on NVIDIA GPUs
 
-Developer: Jinwu Yang@ Institute of Computing Technology, Chinese Academy of Sciences
+(C) 2025 by Institute of Computing Technology, Chinese Academy of Sciences. 
+- Developer: Wenjing Huang, Jinwu Yang 
+- Advisor: Dingwen Tao, Guangming Tan
 
 ## Building
 
