@@ -1,6 +1,8 @@
-# MANS: Optimizing ANS Encoding for Multi-Byte Integer Data on the GPU
+# MANS: Optimizing ANS Encoding for Multi-Byte Integer Data on NVIDIA GPUs
 
-MANS is a GPU-based ANS compressor for multi-byte integer data, which achieves high compression ratios and high throughput on small multi-byte integer datasets. The core concept of MANS is the ADM kernel(adapative data mapping). We evaluate the performance of MANS using six integer datasets on an A100 GPU. Results demonstrate that MANS achieves compression ratios that are 1.17x to 2.23x higher than the original ANS. At the same time,  MANS achieves compression ratios up to 1.92x higher than state-of-the-art optimized ANS(ADT-FSE).
+(C) 2025 by Institute of Computing Technology, Chinese Academy of Sciences. 
+- Developer: Wenjing Huang, Jinwu Yang 
+- Advisor: Dingwen Tao, Guangming Tan
 
 ## Building
 
