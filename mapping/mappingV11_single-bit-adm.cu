@@ -14,7 +14,7 @@
 static const int cmp_tblock_size = 32; // 32 threads
 // static const int dec_tblock_size = 32; // 32 should be the best, not need to modify.
 static const int cmp_chunk = 16;
-static const int max_bytes_signal_per_ele_16b = 2;
+static const int max_bytes_signal_per_ele_16b = 4;
 // static const int cmpbytes_per_element_32b = 8;
 // static const int dec_chunk = 1024;
 static const int aligned = 8;
@@ -47,17 +47,6 @@ __global__ void restore_signal(int* d_output_lengths, uint16_t* d_signal_length,
 
     uint8_t local_signal[cmp_chunk * cmp_tblock_size] = {0}; // 每个线程保存的16个解析结果
 
-    // if(idx == 0)
-    // {
-    //     for(int i = 0; i < d_signal_length[idx] * cmp_tblock_size; i+=d_signal_length[idx])
-    //     {
-    //         printf("thread [%d]:", i / 3);
-    //         for(int j = 0; j < d_signal_length[idx]; j ++)
-    //             printf("%d\t", d_concatenated_signals[i + j]);
-    //         printf("\n");
-    //     }
-    // }
-
     for(; byte_idx < src_end_idx; byte_idx += d_signal_length[idx])
     {
         int offset_byte = 0;
@@ -69,33 +58,27 @@ __global__ void restore_signal(int* d_output_lengths, uint16_t* d_signal_length,
             //读取数据流
             if (bit_count == 0) {
                 bit_buffer = d_concatenated_signals[byte_idx + offset_byte];
-                // if(idx ==0) printf("read %d", d_concatenated_signals[13]);
                 bit_count = 8;
                 offset_byte += 1;
-                // if(idx == 0 && byte_idx == 87) printf("load %d %d\t", bit_buffer,offset_byte);
             }
     
             if (bit_buffer & (1 << 7)) { // 检查最高位是否为1
                 // 遇到新的信号起点，切换到下一个信号
                 signal_idx ++;
                 signal_count++;
-                // if(idx == 0 && byte_idx == 87) printf("local_signal[%d] = %d, saved %d\t", signal_idx - 1, local_signal[signal_idx - 1], signal_count);
                 if (signal_count >= 16)
                 {
                     signal_idx--;
                     break;
                 }
             } else {
-                // 当前信号的0计数加1
                 local_signal[signal_idx]++;
-                // if(idx == 0 && byte_idx == 87) printf("local_signal[%d] += 1\t", signal_idx);
             }
     
             // 左移1位，继续处理下一位
             bit_buffer <<= 1;
             bit_count--;
         }
-        // if(idx == 0 && byte_idx == 87) printf("\n");
     }
 
     int2* signal_int2 = reinterpret_cast<int2*>(d_signals + dst_start_idx);
@@ -105,15 +88,6 @@ __global__ void restore_signal(int* d_output_lengths, uint16_t* d_signal_length,
     for (int i = 0; i < cmp_tblock_size * cmp_chunk / 8; ++i) {
         signal_int2[i] = local_signal_int2[i];
     }
-
-    // if(idx == 0)
-    // {
-    //     int start = 464;
-    //     for(int i = 0 ; i < 16 ;i++)
-    //     {
-    //         printf("restored signal [%d]: %d\n", start+i, local_signal[start + i]);
-    //     }
-    // }
 }
 
 __global__ void decompress_kernel_16b(uint16_t* decmp_data, uint16_t* centers, uint8_t* codes, uint8_t* signals, int shift) {
@@ -211,10 +185,7 @@ __global__ void map_values_kernel_16b(const uint16_t* data, uint8_t* code, uint8
         } else {
             centers[bid] = 0; // 避免除以 0
         }
-    }
-
-    // if(idx == 0) printf("%d\n", centers[0]);
- 
+    } 
     __syncthreads();
  
      // 使用 center[bid] 继续后续计算
@@ -396,24 +367,6 @@ __global__ void map_values_kernel_16b(const uint16_t* data, uint8_t* code, uint8
         bit_ptr[bit_offset / 8] |= (1 << (7 - (bit_offset % 8)));  
         bit_offset++;
     }
-    
-    // save bit-signal to bit_signal
-
-    // if(warp == 140 && tid == 1)
-    // {
-    //     for(int i = 0; i < signal_length[bid]; i++)
-    //     {
-    //         printf("[%d]: %d \n", i, bit_signal[idx * cmp_chunk * max_bytes_signal_per_ele_16b + i]);
-    //     }
-    // }
-
-    // if(warp == 140 && tid == 1)
-    // {
-    //     for(int i = 0; i < cmp_chunk; i++)
-    //     {
-    //         printf("[%d]: ori %d code %d signal %d \n", idx * 16 + i, data[idx * 16 + i], local_code[i], local_signal[i]);
-    //     }
-    // }
 }
 
 
@@ -451,49 +404,32 @@ __global__ void concat(
     const uint16_t* d_signal_length,   // 每个 warp 的 bitstream 长度
     const int* d_output_lengths,  // 前缀和数组，存放目标偏移
     uint8_t* d_concatenated_output,  // 目标拼接后数据
-    int gsize
+    int gsize,
+    int num_elements
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;  // 计算 warp 索引
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;  // 计算索引
     if(idx >= gsize) return;
 
     // 计算当前 warp 的输入数据起始位置
     int src_offset = idx * cmp_chunk * cmp_tblock_size * max_bytes_signal_per_ele_16b;
     int dst_offset = d_output_lengths[idx] * cmp_tblock_size;  // 目标位置偏移（前缀和）
-    // if(idx == 0) printf("%d %d\n",dst_offset , d_signal_length[idx]);
-
-
     int length = d_signal_length[idx]; 
+
     for(int t = 0; t < cmp_tblock_size; t++)
     {
         for (int i = 0; i < length; i++) {
-            // if(idx == 0) printf("%d\t",d_bit_signals[src_offset + t * cmp_chunk * max_bytes_signal_per_ele_16b + i]);
+            if(src_offset + t * cmp_chunk * max_bytes_signal_per_ele_16b + i > num_elements * max_bytes_signal_per_ele_16b) break;
             d_concatenated_output[dst_offset + t * length + i] = d_bit_signals[src_offset + t * cmp_chunk * max_bytes_signal_per_ele_16b + i];
-            // printf("%d\n",dst_offset + t * length + i);
         }
     }
-
-
-    // if(idx == 0)
-    // {
-    //     for(int t = 0; t < cmp_tblock_size; t++)
-    //     {
-    //         for (int i = 0; i < 16; i++) {
-    //             printf("%d\t", d_bit_signals[src_offset + t * cmp_chunk * max_bytes_signal_per_ele_16b + i]);
-    //         }
-    //         printf("\n");
-    //     }
-
-    //     for(int t = 0; t < cmp_tblock_size; t++)
-    //     {
-    //         for (int i = 0; i < length; i++) {
-    //             printf("%d\t", d_concatenated_output[dst_offset + t * length + i]);
-    //         }
-    //         printf("\n");
-    //     }
-    // }
-
 }
 
+__global__ void convert_uint16_to_int(const uint16_t* input, int* output, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        output[idx] = static_cast<int>(input[idx]);
+    }
+}
 
 int main(int argc, char** argv) {
     if (argc < 4) {
@@ -534,8 +470,6 @@ int main(int argc, char** argv) {
     int bsize = cmp_tblock_size;
     int gsize = (num_elements + bsize * cmp_chunk - 1) / (bsize * cmp_chunk);
 
-    // printf("block: %d threads: %d\n", gsize, bsize * gsize);
-
     // define 
     void* d_data;
     void* d_decmpdata;
@@ -560,7 +494,9 @@ int main(int argc, char** argv) {
 
         cudaMalloc(&d_centers, gsize * sizeof(uint16_t));  
         cudaMalloc(&d_bit_signals, bsize * gsize * cmp_chunk * max_bytes_signal_per_ele_16b * sizeof(uint8_t));
+        cudaMemset(d_bit_signals, 0, bsize * gsize * cmp_chunk * max_bytes_signal_per_ele_16b * sizeof(uint8_t));
         cudaMalloc(&d_concatenated_signals, bsize * gsize * cmp_chunk * max_bytes_signal_per_ele_16b * sizeof(uint8_t));
+        cudaMemset(d_concatenated_signals, 255, bsize * gsize * cmp_chunk * max_bytes_signal_per_ele_16b * sizeof(uint8_t));
     } else if (data_type == "uint32") {
         // cudaMalloc(&d_decmpdata, bsize * gsize * cmp_chunk * sizeof(uint32_t));
 
@@ -568,16 +504,16 @@ int main(int argc, char** argv) {
         // cudaMalloc(&d_bit_signals, bsize * gsize * cmp_chunk * sizeof(uint8_t));
     }
 
-    // tmp memory allocation
-    int* d_output_lengths;
-    cudaMalloc(&d_output_lengths, gsize * sizeof(int));
-
     // mem copy
     cudaMemcpy(d_data, h_data, data_size, cudaMemcpyHostToDevice);
 
     //prefix-sum initialize
+    int* d_output_lengths;
+    cudaMalloc(&d_output_lengths, gsize * sizeof(int));
+    int* d_signal_length_int;
+    cudaMalloc(&d_signal_length_int, gsize * sizeof(int));
     thrust::device_ptr<int> dev_output_lengths(d_output_lengths);
-    thrust::device_ptr<uint16_t> dev_signal_length(d_signal_length);
+    thrust::device_ptr<int> dev_signal_length(d_signal_length_int);
 
     // warmup
     for(int i = 0; i < 2; i++)
@@ -615,10 +551,15 @@ int main(int argc, char** argv) {
 
     // print_device_arrays(d_signal_length, d_output_lengths, 3, 3);
 
+    int threads = 256;
+    int blocks = (gsize + threads - 1) / threads;
+    convert_uint16_to_int<<<blocks, threads>>>(d_signal_length, d_signal_length_int, gsize);
+    cudaDeviceSynchronize();
+
     // prefix-sum time
     cudaEventRecord(start);
 
-    thrust::exclusive_scan(dev_signal_length, dev_signal_length + gsize, dev_output_lengths);
+    thrust::exclusive_scan(dev_signal_length, dev_signal_length + gsize, dev_output_lengths);  
     cudaDeviceSynchronize();
 
     cudaEventRecord(stop);
@@ -626,14 +567,12 @@ int main(int argc, char** argv) {
     float prefixsum_milliseconds = 0;
     cudaEventElapsedTime(&prefixsum_milliseconds, start, stop);
 
-    // print_device_arrays(d_signal_length, d_output_lengths, 3, 3);
-
     //concat time
     int concat_b = 256;
     int concat_g = (gsize + concat_b - 1) / concat_b;
     cudaEventRecord(start);
     concat<<<concat_g, concat_b>>>(
-        d_bit_signals, d_signal_length, d_output_lengths, d_concatenated_signals, gsize);
+        d_bit_signals, d_signal_length, d_output_lengths, d_concatenated_signals, gsize, num_elements);
     cudaDeviceSynchronize();
 
     cudaEventRecord(stop);
@@ -712,8 +651,8 @@ int main(int argc, char** argv) {
     prefixsum_milliseconds = prefixsum_milliseconds;
 
     // decmp kernel 2: restore signal
-    int threads = 256;
-    int blocks = (gsize + threads - 1) / threads;
+    threads = 256;
+    blocks = (gsize + threads - 1) / threads;
     uint8_t* d_signals;
     cudaMalloc(&d_signals, bsize * gsize * cmp_chunk * sizeof(uint8_t));
     cudaEventRecord(start);
@@ -727,8 +666,6 @@ int main(int argc, char** argv) {
 
     // decmp kernel 3: decmp adm
     int decmp_gsize = (num_elements + bsize * decmp_chunk - 1) / (bsize * decmp_chunk);
-
-    // printf("%d %d\n", gsize, decmp_gsize);
 
     cudaEventRecord(start);
     if (data_type == "uint16") {
@@ -806,52 +743,6 @@ int main(int argc, char** argv) {
 
     if(test) printf("\033[0;32mPass error check!\033[0m\n");
 
-    // 设定打印范围
-    int debug_start_idx = 71705;   // 可以修改为任意起始索引
-    int debug_end_idx = 71708;     // 需要检查的数据长度
-
-    // 申请 host 端数组
-    uint16_t* h_centers = new uint16_t[gsize];
-    uint8_t* h_codes = new uint8_t[num_elements];
-    uint8_t* h_signals = new uint8_t[num_elements];
-
-    // 将数据从 GPU 复制到 CPU
-    cudaMemcpy(h_centers, d_centers, gsize * sizeof(uint16_t), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_codes, d_codes, num_elements * sizeof(uint8_t), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_signals, d_signals, num_elements * sizeof(uint8_t), cudaMemcpyDeviceToHost);
-
-
-    // 打印 Centers
-    // uint16_t* original_data = static_cast<uint16_t*>(h_data);
-
-    // printf("%d\n", h_centers[140]);
-    // printf("==== datas (部分数据) ====\n");
-    // for (int i = debug_start_idx; i < debug_end_idx; i++) {  // 仅打印最多16个中心值
-    //     printf("[%d]: %d\n", i, original_data[i]);
-    // }
-    // printf("\n");
-
-    // // 打印 Codes
-    // printf("==== d_codes (部分数据) ====\n");
-    // for (int i = debug_start_idx; i < debug_end_idx; i++) {
-    //     printf("[%d]: %u\n", i, h_codes[i]);
-    // }
-    // printf("\n");
-
-    // // 打印 Signals
-    // printf("==== d_signals (部分数据) ====\n");
-    // for (int i = debug_start_idx; i < debug_end_idx; i++) {
-    //     printf("[%d]: %u\n", i, h_signals[i]);
-    // }
-    // printf("\n");
-
-    // // 释放 CPU 端内存
-    // delete[] h_centers;
-    // delete[] h_codes;
-    // delete[] h_signals;
-
-
-
     // 清理内存
     cudaFree(d_data);
     cudaFree(d_decmpdata);
@@ -870,8 +761,6 @@ int main(int argc, char** argv) {
 
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
-
-    printf("Memory has been successfully freed.\n");
 
     return 0;
 }
