@@ -14,7 +14,7 @@
 static const int cmp_tblock_size = 32; // 32 threads
 // static const int dec_tblock_size = 32; // 32 should be the best, not need to modify.
 static const int cmp_chunk = 16;
-static const int max_bytes_signal_per_ele_16b = 1;
+static const int max_bytes_signal_per_ele_16b = 2;
 // static const int cmpbytes_per_element_32b = 8;
 // static const int dec_chunk = 1024;
 static const int aligned = 8;
@@ -43,35 +43,59 @@ __global__ void restore_signal(int* d_output_lengths, uint16_t* d_signal_length,
     uint32_t bit_buffer = 0; // 一个32位缓冲区
     int bit_count = 0;
     int byte_idx = src_start_idx;
+    int signal_idx = -1; 
 
     uint8_t local_signal[cmp_chunk * cmp_tblock_size] = {0}; // 每个线程保存的16个解析结果
-    int signal_idx = 0;
+
+    // if(idx == 0)
+    // {
+    //     for(int i = 0; i < d_signal_length[idx] * cmp_tblock_size; i+=d_signal_length[idx])
+    //     {
+    //         printf("thread [%d]:", i / 3);
+    //         for(int j = 0; j < d_signal_length[idx]; j ++)
+    //             printf("%d\t", d_concatenated_signals[i + j]);
+    //         printf("\n");
+    //     }
+    // }
 
     for(; byte_idx < src_end_idx; byte_idx += d_signal_length[idx])
     {
         int offset_byte = 0;
+        int signal_count = -1; 
+        bit_count = 0;
 
-        while (signal_idx < 16 && offset_byte < d_signal_length[idx]) {
+        // while (signal_idx < 16 && offset_byte < d_signal_length[idx]) {
+        while (offset_byte < d_signal_length[idx] || bit_count > 0) {
             //读取数据流
             if (bit_count == 0) {
                 bit_buffer = d_concatenated_signals[byte_idx + offset_byte];
+                // if(idx ==0) printf("read %d", d_concatenated_signals[13]);
                 bit_count = 8;
                 offset_byte += 1;
+                // if(idx == 0 && byte_idx == 87) printf("load %d %d\t", bit_buffer,offset_byte);
             }
     
             if (bit_buffer & (1 << 7)) { // 检查最高位是否为1
                 // 遇到新的信号起点，切换到下一个信号
-                signal_idx++;
-                if (signal_idx >= 16) break;
+                signal_idx ++;
+                signal_count++;
+                // if(idx == 0 && byte_idx == 87) printf("local_signal[%d] = %d, saved %d\t", signal_idx - 1, local_signal[signal_idx - 1], signal_count);
+                if (signal_count >= 16)
+                {
+                    signal_idx--;
+                    break;
+                }
             } else {
                 // 当前信号的0计数加1
                 local_signal[signal_idx]++;
+                // if(idx == 0 && byte_idx == 87) printf("local_signal[%d] += 1\t", signal_idx);
             }
     
             // 左移1位，继续处理下一位
             bit_buffer <<= 1;
             bit_count--;
         }
+        // if(idx == 0 && byte_idx == 87) printf("\n");
     }
 
     int2* signal_int2 = reinterpret_cast<int2*>(d_signals + dst_start_idx);
@@ -82,7 +106,14 @@ __global__ void restore_signal(int* d_output_lengths, uint16_t* d_signal_length,
         signal_int2[i] = local_signal_int2[i];
     }
 
-
+    // if(idx == 0)
+    // {
+    //     int start = 464;
+    //     for(int i = 0 ; i < 16 ;i++)
+    //     {
+    //         printf("restored signal [%d]: %d\n", start+i, local_signal[start + i]);
+    //     }
+    // }
 }
 
 __global__ void decompress_kernel_16b(uint16_t* decmp_data, uint16_t* centers, uint8_t* codes, uint8_t* signals, int shift) {
@@ -357,23 +388,32 @@ __global__ void map_values_kernel_16b(const uint16_t* data, uint8_t* code, uint8
         bit_ptr[bit_offset / 8] |= (1 << (7 - (bit_offset % 8)));  
         bit_offset++;
 
-        // 填充 0
-        // for (int j = 0; j < num_zeros; j++) {
-        //     bit_ptr[(bit_offset) / 8] &= ~(1 << (7 - (bit_offset % 8)));  
-        //     bit_offset++;
-        // }
         bit_offset += num_zeros;
     }
 
     // padding to max length(byte)
-    while (bit_offset < max_bitstream_length * 8) {
+    while (bit_offset < signal_length[bid] * 8) {
         bit_ptr[bit_offset / 8] |= (1 << (7 - (bit_offset % 8)));  
         bit_offset++;
     }
     
     // save bit-signal to bit_signal
 
-    // if(warp == 0) printf("%d\n", max_bitstream_length);
+    // if(warp == 140 && tid == 1)
+    // {
+    //     for(int i = 0; i < signal_length[bid]; i++)
+    //     {
+    //         printf("[%d]: %d \n", i, bit_signal[idx * cmp_chunk * max_bytes_signal_per_ele_16b + i]);
+    //     }
+    // }
+
+    // if(warp == 140 && tid == 1)
+    // {
+    //     for(int i = 0; i < cmp_chunk; i++)
+    //     {
+    //         printf("[%d]: ori %d code %d signal %d \n", idx * 16 + i, data[idx * 16 + i], local_code[i], local_signal[i]);
+    //     }
+    // }
 }
 
 
@@ -419,15 +459,38 @@ __global__ void concat(
     // 计算当前 warp 的输入数据起始位置
     int src_offset = idx * cmp_chunk * cmp_tblock_size * max_bytes_signal_per_ele_16b;
     int dst_offset = d_output_lengths[idx] * cmp_tblock_size;  // 目标位置偏移（前缀和）
+    // if(idx == 0) printf("%d %d\n",dst_offset , d_signal_length[idx]);
 
-    int length = d_signal_length[idx] * 32;  // 每个 warp 共有 32 线程，每个线程的长度
 
-    // ("%d %d %d\n", idx, d_signal_length[idx], d_output_lengths[idx]);
-
-    // 复制有效数据到目标位置
-    for (int i = 0; i < length; i++) {
-        d_concatenated_output[dst_offset + i] = d_bit_signals[src_offset + i];
+    int length = d_signal_length[idx]; 
+    for(int t = 0; t < cmp_tblock_size; t++)
+    {
+        for (int i = 0; i < length; i++) {
+            // if(idx == 0) printf("%d\t",d_bit_signals[src_offset + t * cmp_chunk * max_bytes_signal_per_ele_16b + i]);
+            d_concatenated_output[dst_offset + t * length + i] = d_bit_signals[src_offset + t * cmp_chunk * max_bytes_signal_per_ele_16b + i];
+            // printf("%d\n",dst_offset + t * length + i);
+        }
     }
+
+
+    // if(idx == 0)
+    // {
+    //     for(int t = 0; t < cmp_tblock_size; t++)
+    //     {
+    //         for (int i = 0; i < 16; i++) {
+    //             printf("%d\t", d_bit_signals[src_offset + t * cmp_chunk * max_bytes_signal_per_ele_16b + i]);
+    //         }
+    //         printf("\n");
+    //     }
+
+    //     for(int t = 0; t < cmp_tblock_size; t++)
+    //     {
+    //         for (int i = 0; i < length; i++) {
+    //             printf("%d\t", d_concatenated_output[dst_offset + t * length + i]);
+    //         }
+    //         printf("\n");
+    //     }
+    // }
 
 }
 
@@ -517,7 +580,7 @@ int main(int argc, char** argv) {
     thrust::device_ptr<uint16_t> dev_signal_length(d_signal_length);
 
     // warmup
-    for(int i = 0; i < 0; i++)
+    for(int i = 0; i < 2; i++)
     {
         if (data_type == "uint16") {
             map_values_kernel_16b<<<gsize, bsize>>>(
@@ -665,6 +728,8 @@ int main(int argc, char** argv) {
     // decmp kernel 3: decmp adm
     int decmp_gsize = (num_elements + bsize * decmp_chunk - 1) / (bsize * decmp_chunk);
 
+    // printf("%d %d\n", gsize, decmp_gsize);
+
     cudaEventRecord(start);
     if (data_type == "uint16") {
         decompress_kernel_16b<<<decmp_gsize, bsize>>>((uint16_t*)d_decmpdata, (uint16_t*)d_centers, d_codes, d_signals, shift);
@@ -740,6 +805,51 @@ int main(int argc, char** argv) {
     }
 
     if(test) printf("\033[0;32mPass error check!\033[0m\n");
+
+    // 设定打印范围
+    int debug_start_idx = 71705;   // 可以修改为任意起始索引
+    int debug_end_idx = 71708;     // 需要检查的数据长度
+
+    // 申请 host 端数组
+    uint16_t* h_centers = new uint16_t[gsize];
+    uint8_t* h_codes = new uint8_t[num_elements];
+    uint8_t* h_signals = new uint8_t[num_elements];
+
+    // 将数据从 GPU 复制到 CPU
+    cudaMemcpy(h_centers, d_centers, gsize * sizeof(uint16_t), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_codes, d_codes, num_elements * sizeof(uint8_t), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_signals, d_signals, num_elements * sizeof(uint8_t), cudaMemcpyDeviceToHost);
+
+
+    // 打印 Centers
+    // uint16_t* original_data = static_cast<uint16_t*>(h_data);
+
+    // printf("%d\n", h_centers[140]);
+    // printf("==== datas (部分数据) ====\n");
+    // for (int i = debug_start_idx; i < debug_end_idx; i++) {  // 仅打印最多16个中心值
+    //     printf("[%d]: %d\n", i, original_data[i]);
+    // }
+    // printf("\n");
+
+    // // 打印 Codes
+    // printf("==== d_codes (部分数据) ====\n");
+    // for (int i = debug_start_idx; i < debug_end_idx; i++) {
+    //     printf("[%d]: %u\n", i, h_codes[i]);
+    // }
+    // printf("\n");
+
+    // // 打印 Signals
+    // printf("==== d_signals (部分数据) ====\n");
+    // for (int i = debug_start_idx; i < debug_end_idx; i++) {
+    //     printf("[%d]: %u\n", i, h_signals[i]);
+    // }
+    // printf("\n");
+
+    // // 释放 CPU 端内存
+    // delete[] h_centers;
+    // delete[] h_codes;
+    // delete[] h_signals;
+
 
 
     // 清理内存
