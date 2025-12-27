@@ -123,6 +123,9 @@ if(BUILD_CPU)
   # mans compress：build/cpu/cpu_mans_compress
   add_executable(cpu_mans_compress 
     cpu/cpu_mans_compress.cpp
+    cpu/mans_cpu.cpp
+    cpu/adm/adm_utils.cpp
+    cpu/pans/pans_utils.cpp
   )
   set_target_properties(cpu_mans_compress PROPERTIES
       RUNTIME_OUTPUT_DIRECTORY ${cpu_root_binary_dir}
@@ -134,6 +137,9 @@ if(BUILD_CPU)
   # mans decompress：build/cpu/cpu_mans_decompress
   add_executable(cpu_mans_decompress
    cpu/cpu_mans_decompress.cpp
+   cpu/mans_cpu.cpp
+   cpu/adm/adm_utils.cpp
+   cpu/pans/pans_utils.cpp
    )
   set_target_properties(cpu_mans_decompress PROPERTIES
       RUNTIME_OUTPUT_DIRECTORY ${cpu_root_binary_dir}
