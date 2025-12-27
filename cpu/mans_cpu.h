@@ -18,7 +18,8 @@ void compress_internal(
 
 
 void decompress_internal(
-    const std::vector<uint8_t>& input_data, 
+    const void* input_data, 
+    size_t length,              
     const MansParams& params, 
     std::vector<uint8_t>& out,
     bool save_adm, 

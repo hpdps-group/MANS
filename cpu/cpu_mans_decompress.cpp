@@ -56,7 +56,8 @@ int main(int argc, char** argv) {
     
     // Core decompress: set debug parameters (save_adm, dump_path, open_benchmark = true)
     mans::cpu::decompress_internal(
-        input_data,
+        input_data.data(),    // const void* input_data
+        input_data.size(),    // size_t length
         params,
         output_bytes,
         save_adm,
@@ -66,8 +67,7 @@ int main(int argc, char** argv) {
 
     // 4. Save the result
     // Note: the internal interface has already converted vector<u16/u32> into vector<u8> (byte stream),
-    // so we can write it directly using save_u8_file. This is equivalent to the previous binary output
-    // of save_u16_file.
+    // so we can write it directly using save_u8_file.
     if (!save_u8_file(output_file, output_bytes)) {
         std::cerr << "Failed to write output file: " << output_file << "\n";
         return 1;

@@ -30,13 +30,14 @@ inline void compress(
 
 // top module: Decompress
 inline void decompress(
-    const std::vector<uint8_t>& input_data, 
+    const void* input_data, 
+    size_t length,
     const MansParams& params, 
     std::vector<uint8_t>& out
 ) {
     if (params.backend == Backend::CPU) {
-        // set all debug signal to false at release
-        mans::cpu::decompress_internal(input_data, params, out, false, "", false);
+        // set all debug signal to false at release 
+        mans::cpu::decompress_internal(input_data, length, params, out, false, "", false);
         return;
     }
     if (params.backend == Backend::NVIDIA) {

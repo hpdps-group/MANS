@@ -57,17 +57,17 @@ static void prepend_header(
 // 2. Decompress Helper Function
 // ==========================================
 
-static bool strip_header(
-    const std::vector<std::uint8_t>& all,
-    std::vector<std::uint8_t>& payload,
-    std::uint8_t& codec)
+static bool parse_header(
+    const uint8_t* data, 
+    size_t length, 
+    uint8_t& codec)
 {
-    if (all.size() < sizeof(MansHeader)) {
+    if (length < sizeof(MansHeader)) {
         std::cerr << "[Error] File too small, invalid mans format.\n";
         return false;
     }
-    codec = all[0];
-    payload.assign(all.begin() + 1, all.end());
+    // read first byte as codec
+    codec = data[0]; 
     return true;
 }
 
@@ -131,28 +131,33 @@ void do_compress_t(const T* data_ptr, size_t length, const MansParams& params,
 }
 
 template<typename T>
-void do_decompress_t(const std::vector<uint8_t>& input_data, 
+void do_decompress_t(const uint8_t* input_ptr, size_t length,
                      std::vector<uint8_t>& final_out,
                      bool save_adm, const std::string& dump_path, bool open_benchmark)
 {
-
-    std::vector<uint8_t> payload;
+    
     uint8_t codec = 0;
-    if (!strip_header(input_data, payload, codec)) {
-        return; 
+    if (!parse_header(input_ptr, length, codec)) {
+        return;
     }
+
+    // skip the 1-byte header
+    const uint8_t* payload_ptr = input_ptr + 1;
+    size_t payload_len = length - 1;
+
+    
+    std::vector<uint8_t> payload_vec(payload_ptr, payload_ptr + payload_len);
 
     // 2. PANS Decompress
     // The result of PANS may be the final data (Codec 2), or it may be ADM-compressed data (Codec 1)
     std::vector<uint8_t> pans_data;
-    
 
     if (open_benchmark) {
-        pans_decompress_and_benchmark(payload, pans_data);
+        pans_decompress_and_benchmark(payload_vec, pans_data);
     } else {
         uint32_t bs=0, cs=0; // dummy vars if required by signature
         double dur = 0.0;
-        pans_decompress(payload, pans_data, bs, cs,dur); 
+        pans_decompress(payload_vec, pans_data, bs, cs,dur); 
     }
 
     if (codec == 2) {
@@ -168,7 +173,7 @@ void do_decompress_t(const std::vector<uint8_t>& input_data,
             save_u8_file(dump_path, pans_data);
         }
 
-        // ADM Decompress (还原为 T 类型)
+        // ADM Decompress 
         std::vector<T> recovered_items;
         if (open_benchmark) {
             adm_decompress_and_benchmark(pans_data, recovered_items);
@@ -202,13 +207,18 @@ void compress_internal(const void* input_data, size_t length, const MansParams& 
     }
 }
 
-void decompress_internal(const std::vector<uint8_t>& input_data, const MansParams& params, 
+
+void decompress_internal(const void* input_data, size_t length, const MansParams& params, 
                          std::vector<uint8_t>& out, 
                          bool save_adm, const std::string& dump_path, bool open_benchmark) {
+
+
+    const uint8_t* ptr = static_cast<const uint8_t*>(input_data);
+
     if (params.dtype == DataType::U16) {
-        do_decompress_t<uint16_t>(input_data, out, save_adm, dump_path, open_benchmark);
+        do_decompress_t<uint16_t>(ptr, length, out, save_adm, dump_path, open_benchmark);
     } else if (params.dtype == DataType::U32) {
-        do_decompress_t<uint32_t>(input_data, out, save_adm, dump_path, open_benchmark);
+        do_decompress_t<uint32_t>(ptr, length, out, save_adm, dump_path, open_benchmark);
     }
 }
 

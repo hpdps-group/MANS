@@ -4,12 +4,12 @@
 namespace mans {
 
 
-struct MansParams {
+struct  MansParams {
     uint32_t backend;       // 0: CPU, 1: GPU
     uint32_t dtype;         // 0: U16, 1: U32
-    uint32_t adm_threshold; // block max diff > adm_threshold -> skip adm mode
+    uint32_t adm_threshold; // (block max diff > adm_threshold) -> skip adm mode
 };
-
+static_assert(sizeof(MansParams) % 4 == 0, "MansParams size must be multiple of 4 bytes");
 
 namespace Backend {
     constexpr uint32_t CPU = 0;
