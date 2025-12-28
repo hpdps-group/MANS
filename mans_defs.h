@@ -21,11 +21,10 @@ namespace DataType {
     constexpr uint32_t U32 = 1;
 }
 
-// === 2. 文件头定义 ===
 struct MansHeader {
     std::uint8_t codec;  // 1 = ADM, 2 = ANS
 };
-// 静态断言：确保编译器不会给它加 padding，保证它占 1 字节
+// Static assertion: ensure the compiler doesn't add padding so it remains 1 byte in size
 static_assert(sizeof(MansHeader) == 1, "MansHeader must be 1 byte");
 
 } // namespace mans
