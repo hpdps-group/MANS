@@ -6,27 +6,57 @@
 #include <filesystem>
 #include <fstream>
 #include <chrono>
+#include <cmath>
+#include <limits>
+#include <map>
 
 #include <hdf5.h>
-#include "H5Z-MANS_config.h" 
+// Assume the config header still exists
+#include "H5Z-MANS_config.h"
 
 // ==========================================
-// Color Definitions (ANSI Escape Codes)
-// ==========================================
-const std::string RST  = "\033[0m";      // Reset
-const std::string RED  = "\033[1;31m";   // Error / Failure
-const std::string GRN  = "\033[1;32m";   // Success
-const std::string YLW  = "\033[1;33m";   // Warning / Fallback
-const std::string BLU  = "\033[1;36m";   // Metrics / Info (Cyan for better visibility)
-const std::string BOLD = "\033[1m";      // Titles
-
-// ==========================================
-// Global Helper Definitions
+// 1. Constants & Definitions
 // ==========================================
 
-#define H5Z_FILTER_MANS_ID 32001
+// Filter IDs
+#define FILTER_ID_DEFLATE 1
+#define FILTER_ID_ZSTD    32015
+#define FILTER_ID_MANS    32001
 
-// Macro with Red Color for Errors
+// Simulation Control (Defaults)
+// Smooth: good for compression, only small noise
+// Spike:  contains huge jumps, used to test ADM fallback
+// Random: full-range random noise, theoretically not compressible
+const double SIM_RATIO_SMOOTH = 1.0;
+const double SIM_RATIO_SPIKE  = 0.0;
+const double SIM_RATIO_RANDOM = 0.0;
+const int    SIM_NOISE_RANGE  = 20;
+const size_t SIM_BLOCK_SIZE   = 512;
+
+// Color Definitions
+const std::string RST  = "\033[0m";
+const std::string RED  = "\033[1;31m";
+const std::string GRN  = "\033[1;32m";
+const std::string YLW  = "\033[1;33m";
+const std::string BLU  = "\033[1;36m";
+const std::string BOLD = "\033[1m";
+
+// ==========================================
+// 2. Runtime Configuration Struct
+// ==========================================
+struct RunOptions {
+    double  data_size_gb = 0.25;             // Default: 0.25 GB
+    int     filter_id    = FILTER_ID_MANS;   // Default: MANS
+    hsize_t chunk_size   = 512 * 64 * 512;   // Default chunk
+    std::string config_file;
+    std::string output_h5;
+    std::string input_bin;
+};
+
+// ==========================================
+// 3. Helper Functions
+// ==========================================
+
 #define CHECK_H5(func_call) \
     do { \
         if ((func_call) < 0) { \
@@ -37,13 +67,11 @@ const std::string BOLD = "\033[1m";      // Titles
 
 namespace fs = std::filesystem;
 
-// Get file size
 size_t get_file_size(const std::string& filename) {
     if (fs::exists(filename)) return fs::file_size(filename);
     return 0;
 }
 
-// Generic file write
 template <typename T>
 void save_bin(const std::string& filename, const std::vector<T>& data) {
     std::ofstream outfile(filename, std::ios::binary);
@@ -53,7 +81,6 @@ void save_bin(const std::string& filename, const std::vector<T>& data) {
     }
 }
 
-// Generic file read
 template <typename T>
 std::vector<T> load_bin(const std::string& filename) {
     std::ifstream infile(filename, std::ios::binary | std::ios::ate);
@@ -65,49 +92,79 @@ std::vector<T> load_bin(const std::string& filename) {
     return data;
 }
 
-// Generate synthetic test data (Smooth + Spikes)
+// ==========================================
+// 4. Data Generator
+// ==========================================
 template <typename T>
-std::vector<T> generate_synthetic_data(size_t num_elements, uint32_t threshold) {
+std::vector<T> generate_synthetic_data(uint32_t config_threshold, double target_size_gb) {
+    size_t element_size = sizeof(T);
+    size_t total_bytes = static_cast<size_t>(target_size_gb * 1024.0 * 1024.0 * 1024.0);
+    size_t num_elements = total_bytes / element_size;
+
+    // Align to block size
+    if (num_elements % SIM_BLOCK_SIZE != 0) {
+        num_elements = ((num_elements / SIM_BLOCK_SIZE) + 1) * SIM_BLOCK_SIZE;
+    }
+
     std::vector<T> data(num_elements);
     std::mt19937 rng(42);
-    size_t block_size = 512;
-    size_t num_blocks = num_elements / block_size;
-    if (num_blocks == 0) num_blocks = 1;
+
+    std::discrete_distribution<int> type_dist({SIM_RATIO_SMOOTH, SIM_RATIO_SPIKE, SIM_RATIO_RANDOM});
+    std::uniform_int_distribution<int> noise_dist(0, SIM_NOISE_RANGE);
+    T max_val = std::numeric_limits<T>::max();
+    std::uniform_int_distribution<unsigned long long> full_range_dist(0, max_val);
+
+    size_t num_blocks = num_elements / SIM_BLOCK_SIZE;
+    size_t cnt_smooth = 0, cnt_spike = 0, cnt_random = 0;
 
     for (size_t b = 0; b < num_blocks; ++b) {
-        size_t start = b * block_size;
-        size_t end = std::min(start + block_size, num_elements);
-        bool trigger_adm = (b % 2 == 0);
+        size_t start = b * SIM_BLOCK_SIZE;
+        size_t end = std::min(start + SIM_BLOCK_SIZE, num_elements);
+        int block_type = type_dist(rng);
 
-        if (trigger_adm) {
-            T base = 10000;
-            uint32_t range = (threshold > 10) ? (threshold / 2) : 1;
-            std::uniform_int_distribution<int> dist(0, range);
-            for (size_t i = start; i < end; ++i) data[i] = static_cast<T>(base + dist(rng));
-        } else {
-            T base = 20000;
-            for (size_t i = start; i < end; ++i) data[i] = static_cast<T>(base);
-            if (start + 1 < end) {
-                // Create spikes
-                uint32_t spike = base + threshold + 500;
-                data[start + 1] = static_cast<T>((sizeof(T) == 2 && spike > 65535) ? (base - threshold - 500) : spike);
+        if (block_type == 0) { // Smooth
+            cnt_smooth++;
+            T block_base = static_cast<T>(full_range_dist(rng));
+            for (size_t i = start; i < end; ++i) {
+                int noise = noise_dist(rng);
+                if (block_base > (max_val - SIM_NOISE_RANGE)) data[i] = block_base - static_cast<T>(noise);
+                else data[i] = block_base + static_cast<T>(noise);
             }
         }
+        else if (block_type == 1) { // Spike
+            cnt_spike++;
+            T block_base = static_cast<T>(full_range_dist(rng));
+            for (size_t i = start; i < end; ++i) data[i] = block_base;
+            if (start + 1 < end) {
+                uint32_t spike_gap = config_threshold + 500;
+                if (static_cast<unsigned long long>(block_base) + spike_gap > max_val)
+                    data[start + 1] = static_cast<T>(block_base - spike_gap);
+                else
+                    data[start + 1] = static_cast<T>(block_base + spike_gap);
+            }
+        }
+        else { // Random
+            cnt_random++;
+            for (size_t i = start; i < end; ++i) data[i] = static_cast<T>(full_range_dist(rng));
+        }
     }
+
+    std::cout << "  -> [Gen] Target Size: " << target_size_gb << " GB\n";
+    std::cout << "  -> [Gen] Elements:    " << num_elements << "\n";
     return data;
 }
 
 // ==========================================
-// Core Tester Class
+// 5. Core Tester Class
 // ==========================================
 template <typename T>
 class Tester {
 public:
-    Tester(const mans::h5::MansConfig& cfg, hid_t h5_type, std::string h5_path, std::string in_bin_path)
-        : config(cfg), h5_native_type(h5_type), h5_output_file(h5_path), input_bin_file(in_bin_path) 
+    Tester(const mans::h5::MansConfig& cfg, hid_t h5_type, const RunOptions& opts)
+        : config(cfg), h5_native_type(h5_type), options(opts)
     {
-        dump_input_file = h5_output_file + ".input.bin";
-        dump_recon_file = h5_output_file + ".recom.bin";
+        dump_input_file = options.output_h5 + ".input.bin";
+        dump_recon_file = options.output_h5 + ".recon.bin";
     }
 
     void run() {
@@ -120,56 +177,89 @@ public:
 private:
     mans::h5::MansConfig config;
     hid_t h5_native_type;
-    std::string h5_output_file;
-    std::string input_bin_file;     
-    std::string dump_input_file;    
-    std::string dump_recon_file;    
+    RunOptions options;
+
+    std::string dump_input_file;
+    std::string dump_recon_file;
 
     std::vector<T> host_data;
     std::vector<T> recon_data;
     double raw_size_mb = 0;
 
-    // 1. Prepare Data
     void prepare_data() {
         std::cout << BOLD << "[1] Preparing Data..." << RST << "\n";
-        if (!input_bin_file.empty()) {
-            std::cout << "  -> Loading external file: " << input_bin_file << "\n";
+        bool is_generated = false;
+
+        if (!options.input_bin.empty()) {
+            std::cout << "  -> Loading external file: " << options.input_bin << "\n";
             try {
-                host_data = load_bin<T>(input_bin_file);
+                host_data = load_bin<T>(options.input_bin);
             } catch (std::exception& e) {
-                std::cerr << YLW << "  -> [WARN] Failed to load file. Fallback to generator." << RST << "\n";
-                input_bin_file = "";
+                std::cerr << YLW << "  -> [WARN] Failed to load file. Falling back to generator." << RST << "\n";
+                options.input_bin = "";
             }
         }
 
-        if (input_bin_file.empty()) {
-            size_t num = 512 * 2000; // ~1 million elements
-            std::cout << "  -> Generating synthetic data (" << num << " elements)...\n";
-            host_data = generate_synthetic_data<T>(num, config.get_params().adm_threshold);
+        if (options.input_bin.empty()) {
+            std::cout << "  -> Generating synthetic data (Target: " << options.data_size_gb << " GB)...\n";
+            host_data = generate_synthetic_data<T>(config.get_params().adm_threshold, options.data_size_gb);
+            is_generated = true;
         }
 
         raw_size_mb = (host_data.size() * sizeof(T)) / 1048576.0;
         std::cout << "  -> Raw Size: " << BLU << raw_size_mb << " MB" << RST << "\n";
-        
-        save_bin(dump_input_file, host_data);
+
+        if (is_generated) {
+            std::cout << "  -> [Auto-Save] Saving generated raw data...\n";
+            save_bin(dump_input_file, host_data);
+        }
     }
 
-    // 2. Compress & Write
     void compress_write() {
         std::cout << BOLD << "[2] Writing HDF5 (Compression)..." << RST << "\n";
-        
-        hid_t f_id = H5Fcreate(h5_output_file.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
+        std::cout << "  -> Output File: " << GRN << options.output_h5 << RST << "\n";
+
+        hid_t f_id = H5Fcreate(options.output_h5.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
         CHECK_H5(f_id);
 
         hsize_t dims[1] = {host_data.size()};
         hid_t s_id = H5Screate_simple(1, dims, NULL);
         hid_t p_id = H5Pcreate(H5P_DATASET_CREATE);
 
-        hsize_t chunk[1] = {512 * 64}; 
+        // Set chunk size
+        hsize_t chunk[1] = { options.chunk_size };
+        // If the dataset is smaller than the chunk, adjust chunk size
+        if (dims[0] < chunk[0]) chunk[0] = dims[0];
+
+        std::cout << "  -> Chunk Size:  " << chunk[0] << " elements\n";
         CHECK_H5(H5Pset_chunk(p_id, 1, chunk));
 
-        std::vector<unsigned int> cd = config.to_cd_values();
-        CHECK_H5(H5Pset_filter(p_id, H5Z_FILTER_MANS_ID, 0, cd.size(), cd.data()));
+        // Filter selection based on options
+        if (options.filter_id == FILTER_ID_DEFLATE) {
+            unsigned int gzip_level = 6;
+            std::cout << "  -> Filter: " << BLU << "Standard GZIP (Level " << gzip_level << ")" << RST << "\n";
+            CHECK_H5(H5Pset_deflate(p_id, gzip_level));
+
+        } else if (options.filter_id == FILTER_ID_ZSTD) {
+            unsigned int zstd_level = 3;
+            std::cout << "  -> Filter: " << BLU << "Zstandard (Level " << zstd_level << ")" << RST << "\n";
+            htri_t avail = H5Zfilter_avail(FILTER_ID_ZSTD);
+            if (!avail) {
+                std::cerr << RED << "[Error] Zstandard filter (ID " << FILTER_ID_ZSTD << ") not found! " << RST << "\n";
+                std::exit(1);
+            }
+            unsigned int cd_values[1] = { zstd_level };
+            CHECK_H5(H5Pset_filter(p_id, FILTER_ID_ZSTD, H5Z_FLAG_OPTIONAL, 1, cd_values));
+
+        } else if (options.filter_id == FILTER_ID_MANS) {
+            std::cout << "  -> Filter: " << BLU << "MANS Custom (ID " << FILTER_ID_MANS << ")" << RST << "\n";
+            std::vector<unsigned int> cd = config.to_cd_values();
+            CHECK_H5(H5Pset_filter(p_id, FILTER_ID_MANS, 0, cd.size(), cd.data()));
+
+        } else {
+            std::cerr << RED << "[Error] Unknown Filter ID requested: " << options.filter_id << RST << "\n";
+            std::exit(1);
+        }
 
         hid_t d_id = H5Dcreate2(f_id, "dataset", h5_native_type, s_id, H5P_DEFAULT, p_id, H5P_DEFAULT);
 
@@ -180,25 +270,24 @@ private:
 
         double ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
         double throughput = raw_size_mb / (ms/1000.0);
-        
-        std::cout << "  -> Write Time: " << BLU << ms << " ms" << RST 
+
+        std::cout << "  -> Write Time: " << BLU << ms << " ms" << RST
                   << " (" << BLU << throughput << " MB/s" << RST << ")\n";
 
         H5Dclose(d_id); H5Pclose(p_id); H5Sclose(s_id); H5Fclose(f_id);
 
-        size_t c_size = get_file_size(h5_output_file);
+        size_t c_size = get_file_size(options.output_h5);
         double ratio = (double)(host_data.size()*sizeof(T))/c_size;
 
-        std::cout << "  -> File Size:  " << BLU << c_size / 1024.0 << " KB" << RST 
+        std::cout << "  -> File Size:  " << BLU << c_size / 1024.0 << " KB" << RST
                   << " (Ratio: " << BLU << ratio << "x" << RST << ")\n";
     }
 
-    // 3. Decompress & Read
     void decompress_read() {
         std::cout << BOLD << "[3] Reading HDF5 (Decompression)..." << RST << "\n";
         recon_data.resize(host_data.size());
 
-        hid_t f_id = H5Fopen(h5_output_file.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
+        hid_t f_id = H5Fopen(options.output_h5.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
         CHECK_H5(f_id);
         hid_t d_id = H5Dopen2(f_id, "dataset", H5P_DEFAULT);
 
@@ -209,71 +298,98 @@ private:
         double ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
         double throughput = raw_size_mb / (ms/1000.0);
 
-        std::cout << "  -> Read Time:  " << BLU << ms << " ms" << RST 
+        std::cout << "  -> Read Time:  " << BLU << ms << " ms" << RST
                   << " (" << BLU << throughput << " MB/s" << RST << ")\n";
 
         H5Dclose(d_id); H5Fclose(f_id);
-
-        save_bin(dump_recon_file, recon_data);
     }
 
-    // 4. Verify
     void verify() {
         std::cout << BOLD << "[4] Verifying..." << RST << "\n";
         if (host_data == recon_data) {
-            std::cout << "\n" << GRN << "  ****************************************" << RST << "\n";
-            std::cout << GRN << "   [SUCCESS] Data Exact Match (Bit-Exact) " << RST << "\n";
-            std::cout << GRN << "  ****************************************" << RST << "\n";
+            std::cout << GRN << "   [SUCCESS] Data Exact Match" << RST << "\n";
         } else {
-            std::cerr << "\n" << RED << "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" << RST << "\n";
-            std::cerr << RED << "   [FAILURE] Data Mismatch Detected!      " << RST << "\n";
-            std::cerr << RED << "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" << RST << "\n";
-            for(size_t i=0; i<host_data.size(); ++i) {
-                if(host_data[i] != recon_data[i]) {
-                    std::cerr << "  Mismatch at [" << i << "]: Orig=" 
-                              << host_data[i] << " != Recon=" << recon_data[i] << "\n";
-                    break; 
-                }
-            }
+            std::cerr << RED << "   [FAILURE] Data Mismatch Detected!" << RST << "\n";
             exit(1);
         }
     }
 };
 
 // ==========================================
-// Main Function
+// 6. Main Function & Arg Parsing
 // ==========================================
+void print_usage(const char* prog_name) {
+    std::cerr << YLW << "Usage: " << prog_name << " <config_file> <output.h5> [input.bin] [OPTIONS]" << RST << "\n";
+    std::cerr << "Options:\n";
+    std::cerr << "  --size <GB>        Set synthetic data size (default: 0.25)\n";
+    std::cerr << "  --filter <name>    Set filter: mans, zstd, deflate (default: mans)\n";
+    std::cerr << "  --chunk <size>     Set chunk size in elements (default: 16777216)\n";
+}
+
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << YLW << "Usage: " << argv[0] << " <config_file> <output.h5> [input_file.bin]" << RST << "\n";
+        print_usage(argv[0]);
         return 1;
     }
 
-    std::string config_file = argv[1];
-    std::string h5_file = argv[2];
-    std::string in_bin = (argc >= 4) ? argv[3] : "";
+    RunOptions opts;
+    std::vector<std::string> args;
+
+    // Simple argument parser
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--size" && i + 1 < argc) {
+            opts.data_size_gb = std::stod(argv[++i]);
+        }
+        else if (arg == "--chunk" && i + 1 < argc) {
+            opts.chunk_size = std::stoull(argv[++i]);
+        }
+        else if (arg == "--filter" && i + 1 < argc) {
+            std::string f = argv[++i];
+            if (f == "deflate") opts.filter_id = FILTER_ID_DEFLATE;
+            else if (f == "zstd") opts.filter_id = FILTER_ID_ZSTD;
+            else if (f == "mans") opts.filter_id = FILTER_ID_MANS;
+            else opts.filter_id = std::stoi(f); // Allow manual ID
+        }
+        else {
+            args.push_back(arg);
+        }
+    }
+
+    if (args.size() < 2) {
+        std::cerr << RED << "Missing required arguments!" << RST << "\n";
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    opts.config_file = args[0];
+    opts.output_h5   = args[1];
+    if (args.size() >= 3) opts.input_bin = args[2];
 
     mans::h5::MansConfig config;
-    try { config.load(config_file); } 
+    try { config.load(opts.config_file); }
     catch (std::exception& e) { std::cerr << RED << "Config Error: " << e.what() << RST << "\n"; return 1; }
 
     auto dtype = config.get_params().dtype;
-    
+
     std::cout << BOLD << "========================================\n";
     std::cout << "    H5Z-MANS Integration Test Runner    \n";
     std::cout << "========================================" << RST << "\n";
-    std::cout << " Config: " << config_file << "\n";
-    std::cout << " Input:  " << (in_bin.empty() ? "(Auto-Gen)" : in_bin) << "\n";
-    std::cout << " Type:   " << (dtype == mans::DataType::U16 ? "U16" : "U32") << "\n\n";
+    std::cout << " Config: " << opts.config_file << "\n";
+    std::cout << " Output: " << opts.output_h5 << "\n";
+    std::cout << " Size:   " << opts.data_size_gb << " GB\n";
+    std::cout << " Filter: " << opts.filter_id << "\n";
+    std::cout << " Chunk:  " << opts.chunk_size << "\n\n";
 
     if (dtype == mans::DataType::U16) {
-        Tester<uint16_t> t(config, H5T_NATIVE_UINT16, h5_file, in_bin);
+        Tester<uint16_t> t(config, H5T_NATIVE_UINT16, opts);
         t.run();
     } else {
-        Tester<uint32_t> t(config, H5T_NATIVE_UINT32, h5_file, in_bin);
+        Tester<uint32_t> t(config, H5T_NATIVE_UINT32, opts);
         t.run();
     }
 
     H5close();
+    std::cout << "Done\n";
     return 0;
 }

@@ -4,31 +4,38 @@
 
 #include <vector>
 #include <cstdint>
+#include <cstddef> 
 
 template<typename T>
 void adm_compress(
-    const std::vector<T>& input_data,
-    std::vector<std::uint8_t>& output
+    const T* input_data,
+    std::size_t input_len,
+    std::uint8_t* output,
+    std::size_t& output_size
 );
-
 
 template<typename T>
 void adm_decompress(
-    const std::vector<std::uint8_t>& merged,
-    std::vector<T>& recovered
+    const std::uint8_t* merged,
+    std::size_t merged_size,
+    T* recovered,
+    std::size_t& num_elements
 );
-
 
 template<typename T>
 void adm_compress_and_benchmark(
-    const std::vector<T>& input_data,
-    std::vector<std::uint8_t>& output
+    const T* input_data,
+    std::size_t input_len,
+    std::uint8_t* output,
+    std::size_t& output_size
 );
 
 template<typename T>
 void adm_decompress_and_benchmark(
-    const std::vector<std::uint8_t>& merged,
-    std::vector<T>& recovered
+    const std::uint8_t* merged,
+    std::size_t merged_size,
+    T* recovered,
+    std::size_t &num_elements
 );
 
 #endif // ADM_UTILS_H

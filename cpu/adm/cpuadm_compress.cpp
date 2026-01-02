@@ -31,6 +31,7 @@ int main(int argc, char** argv) {
     }
 
     std::vector<std::uint8_t> output;
+    std::size_t compressed_size = 0;
 
     if (is_u2) {
         std::vector<std::uint16_t> input_data;
@@ -38,22 +39,49 @@ int main(int argc, char** argv) {
             std::cerr << "Failed to load input file: " << input_file << "\n";
             return 1;
         }
-        adm_compress_and_benchmark(input_data, output);
+
+
+        std::size_t max_buffer_size = input_data.size() * sizeof(std::uint16_t) * 3 / 2;
+        // Add header size just in case the data is extremely small
+        max_buffer_size += 1024; 
+        
+        output.resize(max_buffer_size);
+
+        // Run the benchmark: write results into `output`, and store the actual size in `compressed_size`
+        adm_compress_and_benchmark<std::uint16_t>(
+            input_data.data(), 
+            input_data.size(), 
+            output.data(), 
+            compressed_size
+        );
+
     } else {
         std::vector<std::uint32_t> input_data;
         if (!load_u32_file(input_file, input_data)) {
             std::cerr << "Failed to load input file: " << input_file << "\n";
             return 1;
         }
-        adm_compress_and_benchmark(input_data, output);
+
+        std::size_t max_buffer_size = input_data.size() * sizeof(std::uint32_t) * 2;
+        max_buffer_size += 1024;
+
+        output.resize(max_buffer_size);
+
+        adm_compress_and_benchmark<std::uint32_t>(
+            input_data.data(), 
+            input_data.size(), 
+            output.data(), 
+            compressed_size
+        );
     }
+    output.resize(compressed_size);
 
     if (!save_u8_file(output_file, output)) {
         std::cerr << "Failed to write output file: " << output_file << "\n";
         return 1;
     }
 
-    std::cout << "ADM finished! Write to " << output_file << "\n";
+    std::cout << "ADM finished! Write to " << output_file << " (Size: " << compressed_size << " bytes)\n";
 
     return 0;
 }

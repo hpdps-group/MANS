@@ -3,12 +3,13 @@
 #include <cstring>
 #include <limits>
 #include <algorithm>
-#include <vector>
-
+#include <new>
 
 #include "adm/adm_utils.h"
 #include "pans/pans_utils.h"
 #include "file_utils.h"
+#define DEBUG_PRINT(msg) \
+    std::cerr << "\033[1;35m[PLUGIN-CORE]\033[0m " << msg << "\n"
 
 namespace mans {
 namespace cpu {
@@ -43,14 +44,25 @@ static bool decide_use_adm(const T* data, size_t size, uint32_t threshold) {
 }
 
 static void prepend_header(
-    const std::vector<std::uint8_t>& payload,
-    std::vector<std::uint8_t>& final_payload,
+    const std::uint8_t* payload,
+    std::size_t payload_size,
+    std::uint8_t* final_payload,
+    std::size_t& final_size,
     std::uint8_t codec)
 {
-    final_payload.clear();
-    final_payload.reserve(1 + payload.size());
-    final_payload.push_back(codec);
-    final_payload.insert(final_payload.end(), payload.begin(), payload.end());
+    final_size = 0;
+
+    if (!final_payload) {
+        return;
+    }
+
+    final_payload[0] = codec;
+
+    if (payload_size > 0) {
+        std::memcpy(final_payload + 1, payload, payload_size);
+    }
+
+    final_size = 1 + payload_size;
 }
 
 // ==========================================
@@ -76,149 +88,257 @@ static bool parse_header(
 // ==========================================
 
 template<typename T>
-void do_compress_t(const T* data_ptr, size_t length, const MansParams& params, 
-                   std::vector<uint8_t>& final_out, 
-                   bool save_adm, const std::string& dump_path, bool open_benchmark) {
-    
-    uint32_t threshold = params.adm_threshold; 
-    if (threshold == 0) threshold = 4000; 
+void do_compress_t(
+    const T* data_ptr,
+    size_t length,
+    const MansParams& params,
+    std::uint8_t* final_out,
+    std::size_t& final_out_size,
+    bool save_adm,
+    const std::string& dump_path,
+    bool open_benchmark
+) {
+    uint32_t threshold = params.adm_threshold;
+    if (threshold == 0) threshold = 4000;
 
     bool use_adm = decide_use_adm(data_ptr, length, threshold);
+    std::uint8_t codec_code = 0;
 
-    std::vector<uint8_t> pans_input;
-    uint8_t codec_code = 0;
+    final_out_size = 0;
+    if (!final_out) {
+        return;
+    }
 
-    if (use_adm) {
-        codec_code = 1; // ADM
-        std::vector<T> temp_vec(data_ptr, data_ptr + length);
-        if (open_benchmark){
-            adm_compress_and_benchmark(temp_vec, pans_input);
+    // PANS input pointer/length (raw bytes or adm-compressed bytes)
+    const std::uint8_t* pans_in_ptr = nullptr;
+    std::size_t pans_in_len = 0;
+
+
+    std::uint8_t* adm_buf = nullptr;
+    std::size_t adm_cap = 0;
+    std::uint8_t* pans_out_buf = nullptr;
+
+    // simple conservative bounds
+    auto raw_bytes = length * sizeof(T);
+
+    try {
+
+        if (use_adm) {
+            codec_code = 1; // ADM
+            adm_cap = raw_bytes * 4 + 256;
+            adm_buf = new std::uint8_t[adm_cap];
+
+            std::size_t adm_size = 0;
+
+            if (open_benchmark) {
+
+                adm_compress_and_benchmark<T>(data_ptr, length, adm_buf, adm_size);
+            } else {
+                adm_compress<T>(data_ptr, length, adm_buf, adm_size);
+            }
+
+            if (adm_size > adm_cap) {
+                std::cerr << "[Error] adm_buf overflow: adm_size > adm_cap.\n";
+                return;
+            }
+
+            if (save_adm && !dump_path.empty()) {
+                std::vector<std::uint8_t> tmp(adm_buf, adm_buf + adm_size);
+                save_u8_file(dump_path, tmp);
+            }
+
+            pans_in_ptr = adm_buf;
+            pans_in_len = adm_size;
         } else {
-            adm_compress(temp_vec, pans_input);
+            codec_code = 2; // Direct
+            pans_in_ptr = reinterpret_cast<const std::uint8_t*>(data_ptr);
+            pans_in_len = raw_bytes;
         }
-        
-        if (save_adm && !dump_path.empty()) {
-            save_u8_file(dump_path, pans_input);
+
+        std::size_t pans_out_len = 0;
+        double pans_dur = 0.0;
+
+        if (open_benchmark) {
+            pans_compress_and_benchmark(
+                pans_in_ptr,
+                pans_in_len,
+                final_out + 1, //reserve 1 byte for codec
+                pans_out_len
+            );
+        } else {
+            pans_compress(
+                pans_in_ptr,
+                pans_in_len,
+                final_out + 1, //reserve 1 byte for codec
+                pans_out_len,
+                pans_dur
+            );
         }
-    } else {
-        codec_code = 2; // Direct
-        pans_input.resize(length * sizeof(T));
-        if (length > 0) {
-            std::memcpy(pans_input.data(), data_ptr, length * sizeof(T));
-        }
+
+        final_out[0] = codec_code;
+        final_out_size=1+pans_out_len;//include codec byte
+    }
+    catch (const std::bad_alloc&) {
+        std::cerr << "[Error] Out of memory during do_compress_t.\n";
+        final_out_size = 0;
     }
 
-    std::vector<uint8_t> pans_output;
-    if (open_benchmark) {
-        pans_compress_and_benchmark(
-            pans_input,
-            pans_output
-        );
-    } else {
-        uint32_t bs=0, cs=0; // dummy vars if required by signature
-        double dur = 0.0;
-        pans_compress(
-            pans_input,
-            pans_output,
-            bs,
-            cs,
-            dur 
-        );
-    }
-    
-
-    prepend_header(pans_output, final_out, codec_code);
+    delete[] adm_buf;
+    delete[] pans_out_buf;
 }
 
 template<typename T>
-void do_decompress_t(const uint8_t* input_ptr, size_t length,
-                     std::vector<uint8_t>& final_out,
-                     bool save_adm, const std::string& dump_path, bool open_benchmark)
-{
-    
+void do_decompress_t(
+    const uint8_t* input_ptr,
+    size_t length,
+    std::uint8_t* final_out,
+    std::size_t& final_out_size,
+    bool save_adm,
+    const std::string& dump_path,
+    bool open_benchmark
+) {
+    final_out_size = 0;
+
     uint8_t codec = 0;
     if (!parse_header(input_ptr, length, codec)) {
         return;
     }
 
-    // skip the 1-byte header
+
     const uint8_t* payload_ptr = input_ptr + 1;
     size_t payload_len = length - 1;
 
-    
-    std::vector<uint8_t> payload_vec(payload_ptr, payload_ptr + payload_len);
+    std::uint8_t* pans_decomp_buf = nullptr;
 
-    // 2. PANS Decompress
-    // The result of PANS may be the final data (Codec 2), or it may be ADM-compressed data (Codec 1)
-    std::vector<uint8_t> pans_data;
+    try {
+        std::size_t pans_decomp_len = 0;
+        get_compress_and_decompressed_len(payload_ptr,payload_len,pans_decomp_len);
+        pans_decomp_buf = new std::uint8_t[pans_decomp_len];
+        double pans_dur = 0.0;
 
-    if (open_benchmark) {
-        pans_decompress_and_benchmark(payload_vec, pans_data);
-    } else {
-        uint32_t bs=0, cs=0; // dummy vars if required by signature
-        double dur = 0.0;
-        pans_decompress(payload_vec, pans_data, bs, cs,dur); 
-    }
-
-    if (codec == 2) {
-        // === Direct Mode ===
-        // PANS decompression output is the original data (byte stream)
-        final_out = std::move(pans_data);
-    } 
-    else if (codec == 1) {
-        // === ADM Mode ===
-        
-        // Debug: Save ADM compressed data
-        if (save_adm && !dump_path.empty()) {
-            save_u8_file(dump_path, pans_data);
-        }
-
-        // ADM Decompress 
-        std::vector<T> recovered_items;
         if (open_benchmark) {
-            adm_decompress_and_benchmark(pans_data, recovered_items);
+            pans_decompress_and_benchmark(payload_ptr, payload_len, pans_decomp_buf, pans_decomp_len);
         } else {
-            adm_decompress(pans_data, recovered_items);
+            pans_decompress(payload_ptr, payload_len, pans_decomp_buf, pans_decomp_len, pans_dur);
         }
 
-        // Convert: vector<T> -> vector<uint8_t> (API requires output as a byte stream)
-        size_t total_bytes = recovered_items.size() * sizeof(T);
-        final_out.resize(total_bytes);
-        if (total_bytes > 0) {
-            std::memcpy(final_out.data(), recovered_items.data(), total_bytes);
+        
+        if (codec == 2) {
+            // Direct Mode
+            if (pans_decomp_len > 0) {
+                std::memcpy(final_out, pans_decomp_buf, pans_decomp_len);
+            }
+            final_out_size = pans_decomp_len;
         }
-    } 
-    else {
-        std::cerr << "[Error] Unknown codec type: " << int(codec) << "\n";
+        else if (codec == 1) {
+            // ADM Mode
+            if (save_adm && !dump_path.empty()) {
+                std::vector<std::uint8_t> tmp(pans_decomp_buf, pans_decomp_buf + pans_decomp_len);
+                save_u8_file(dump_path, tmp);
+            }
+            T* recovered = reinterpret_cast<T*>(final_out);
+
+  
+            std::size_t num_elements = 0;
+
+            if (open_benchmark) {
+                adm_decompress_and_benchmark<T>(pans_decomp_buf, pans_decomp_len, recovered, num_elements);
+            } else {
+                adm_decompress<T>(pans_decomp_buf, pans_decomp_len, recovered, num_elements);
+            }
+
+            final_out_size = num_elements * sizeof(T);
+        }
+        else {
+            std::cerr << "[Error] Unknown codec type: " << int(codec) << "\n";
+        }
+        if (!final_out) {
+            std::cerr << "[Error] final_out is null in ADM mode, cannot decompress.\n";
+            delete[] pans_decomp_buf;
+            return;
+        }
     }
+    catch (const std::bad_alloc&) {
+        std::cerr << "[Error] Out of memory.\n";
+        final_out_size = 0;
+        delete[] pans_decomp_buf;
+        return; 
+    }
+    catch (const std::exception& e) { 
+        std::cerr << "[Error] An exception occurred: " << e.what() << "\n";
+        final_out_size = 0;
+        delete[] pans_decomp_buf; 
+        return;
+    }
+    catch (...) { 
+        std::cerr << "[Error] An unknown exception occurred.\n";
+        final_out_size = 0;
+        delete[] pans_decomp_buf;
+        return;
+    }
+
+    delete[] pans_decomp_buf;
 }
 
 // ==========================================
 // 5. Exposed implementation interface
 // ==========================================
 
-void compress_internal(const void* input_data, size_t length, const MansParams& params, 
-                       std::vector<uint8_t>& out, 
-                       bool save_adm, const std::string& dump_path, bool open_benchmark) {
+void compress_internal(
+    const void* input_data,
+    size_t length,
+    const MansParams& params,  
+    std::uint8_t* out,
+    std::size_t& out_size,
+    bool save_adm,
+    const std::string& dump_path,
+    bool open_benchmark
+) {
     if (params.dtype == DataType::U16) {
-        do_compress_t(static_cast<const uint16_t*>(input_data), length, params, out, save_adm, dump_path, open_benchmark);
+        do_compress_t(
+            static_cast<const uint16_t*>(input_data),
+            length,
+            params,
+            out,
+            out_size,
+            save_adm,
+            dump_path,
+            open_benchmark
+        );
     } else if (params.dtype == DataType::U32) {
-        do_compress_t(static_cast<const uint32_t*>(input_data), length, params, out, save_adm, dump_path, open_benchmark);
+        do_compress_t(
+            static_cast<const uint32_t*>(input_data),
+            length,
+            params,
+            out,
+            out_size,
+            save_adm,
+            dump_path,
+            open_benchmark
+        );
     }
 }
 
-
-void decompress_internal(const void* input_data, size_t length, const MansParams& params, 
-                         std::vector<uint8_t>& out, 
-                         bool save_adm, const std::string& dump_path, bool open_benchmark) {
-
-
+void decompress_internal(
+    const void* input_data,
+    size_t length,
+    const MansParams& params,
+    std::uint8_t* out,
+    std::size_t& out_size,
+    bool save_adm,
+    const std::string& dump_path,
+    bool open_benchmark
+) {
     const uint8_t* ptr = static_cast<const uint8_t*>(input_data);
 
     if (params.dtype == DataType::U16) {
-        do_decompress_t<uint16_t>(ptr, length, out, save_adm, dump_path, open_benchmark);
+        do_decompress_t<uint16_t>(
+            ptr, length, out, out_size, save_adm, dump_path, open_benchmark
+        );
     } else if (params.dtype == DataType::U32) {
-        do_decompress_t<uint32_t>(ptr, length, out, save_adm, dump_path, open_benchmark);
+        do_decompress_t<uint32_t>(
+            ptr, length, out, out_size, save_adm, dump_path, open_benchmark
+        );
     }
 }
 

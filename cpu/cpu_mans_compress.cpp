@@ -6,7 +6,6 @@
 #include <string>
 #include <vector>
 
-
 #include "../mans_defs.h" 
 #include "mans_cpu.h"
 #include "file_utils.h"
@@ -61,17 +60,32 @@ int main(int argc, char** argv) {
 
         std::cout << "Compressing U16 (size=" << host_data.size() << ")...\n";
 
+        // === 预分配输出缓冲区 ===
+        size_t input_bytes = host_data.size() * sizeof(uint16_t);
+        size_t max_out_size = input_bytes*2 + 4096; 
+        compressed_data.resize(max_out_size);
         
+        // 此变量传入时表示 Buffer 容量，返回时表示实际写入大小
+        size_t final_size = max_out_size;
+
         // core compress set debug parameters:save_adm, dump_path, open_benchmark=true
         mans::cpu::compress_internal(
             host_data.data(), 
             host_data.size(), 
             params, 
-            compressed_data, 
+            compressed_data.data(),
+            final_size,            
             save_adm, 
-            output_file + ".adm", // debug path
-            true                  // open_benchmark
+            output_file + ".adm",   // debug path
+            true                    // open_benchmark
         );
+
+    
+        if (final_size > max_out_size) {
+            
+             std::cerr << "Warning: Output truncated or buffer overflow logic triggered.\n";
+        }
+        compressed_data.resize(final_size);
 
     } else { // U32
         std::vector<uint32_t> host_data;
@@ -87,15 +101,24 @@ int main(int argc, char** argv) {
         std::cout << "Compressing U32 (size=" << host_data.size() << ")...\n";
 
         
+        size_t input_bytes = host_data.size() * sizeof(uint32_t);
+        size_t max_out_size = input_bytes*2 + 4096;
+        compressed_data.resize(max_out_size);
+
+        size_t final_size = max_out_size;
+        
         mans::cpu::compress_internal(
             host_data.data(), 
             host_data.size(), 
             params, 
-            compressed_data, 
+            compressed_data.data(), 
+            final_size,
             save_adm, 
             output_file + ".adm", 
             true
         );
+
+        compressed_data.resize(final_size);
     }
 
     if (!save_u8_file(output_file, compressed_data)) {

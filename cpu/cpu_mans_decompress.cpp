@@ -6,7 +6,6 @@
 #include <string>
 #include <vector>
 
-
 #include "../mans_defs.h"
 #include "mans_cpu.h"
 #include "file_utils.h"
@@ -52,22 +51,39 @@ int main(int argc, char** argv) {
 
     std::cout << "Decompressing to " << dtype_str << " (Input size: " << input_data.size() << ")...\n";
 
-    std::vector<uint8_t> output_bytes;
+    // 3. Prepare output buffer
+    size_t estimated_out_size = input_data.size() * 10+4096;
+    std::vector<uint8_t> output_bytes(estimated_out_size);
+    // out_len indicates the buffer capacity when passed in; on return it will be updated by `internal`
+    // to the actual number of bytes written.
+    size_t out_len = output_bytes.size(); 
     
     // Core decompress: set debug parameters (save_adm, dump_path, open_benchmark = true)
     mans::cpu::decompress_internal(
         input_data.data(),    // const void* input_data
         input_data.size(),    // size_t length
         params,
-        output_bytes,
+        output_bytes.data(),  // uint8_t* out (Raw Pointer)
+        out_len,             // size_t* out_len (Capacity -> Actual size)
         save_adm,
         output_file + ".adm", // debug path: output.u2.adm
         true                  // open_benchmark = true
     );
 
-    // 4. Save the result
-    // Note: the internal interface has already converted vector<u16/u32> into vector<u8> (byte stream),
-    // so we can write it directly using save_u8_file.
+    // 4. Resize and Save
+    if (out_len == 0) {
+        std::cerr << "Decompression failed or returned 0 bytes.\n";
+        return 1;
+    }
+
+    
+    if (out_len > output_bytes.capacity()) {
+        std::cerr << "[Warning] Decompressed size logic might be inconsistent (out_len > capacity).\n";
+        
+    }
+    output_bytes.resize(out_len);
+
+    // Note: the internal interface writes bytes directly to our buffer.
     if (!save_u8_file(output_file, output_bytes)) {
         std::cerr << "Failed to write output file: " << output_file << "\n";
         return 1;

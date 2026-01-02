@@ -5,9 +5,9 @@
 ## Features
 
 * **Dynamic Loading:** Built as a shared library (`.so` / `.dll`), allowing usage without recompiling HDF5 applications.
-* **Dual Backend:**
-* **CPU:** Multi-threaded acceleration using OpenMP (AVX512 optimizations).
-* **GPU:** (Experimental) NVIDIA CUDA acceleration.
+-  **Dual Backend:**
+- - **CPU:** Multi-threaded acceleration using OpenMP (AVX512 optimizations).
+- - **GPU:** (Experimental) NVIDIA CUDA acceleration.
 
 
 * **Configurable:** Runtime tuning of compression parameters (thresholds, data types) via filter parameters (`cd_values`).
@@ -65,7 +65,10 @@ see [example.conf](example.conf)
 export HDF5_PLUGIN_PATH=<path of build>/bin/plugins
 
 # 2. Run Test
-# Usage: ./H5Z-MANS_test <config_file> <output_h5_file>
-./bin/h5z-mans/H5Z-MANS_test example.conf output.h5
+# Usage: ./bin/h5z-mans/H5Z-MANS_test <config_file> <output.h5> [input.bin] [OPTIONS]
 
 ```
+Options:
+  --size <GB>        Set synthetic data size (default: 0.25)
+  --filter <name>    Set filter: mans, zstd, deflate (default: mans)
+  --chunk <size>     Set chunk size in elements (default: 16777216)

@@ -11,7 +11,8 @@ void compress(
     const void* input_data, 
     size_t length, 
     const MansParams& params, 
-    std::vector<uint8_t>& out
+    uint8_t* out,
+    size_t & out_size
 );
 
 
@@ -19,7 +20,8 @@ void decompress(
     const void* input_data, 
     size_t length,
     const MansParams& params, 
-    std::vector<uint8_t>& out
+    uint8_t* out,
+    size_t & out_size
 );
 
 } // namespace mans

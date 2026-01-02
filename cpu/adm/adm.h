@@ -36,13 +36,14 @@ struct FileHeader {
 };
 
 inline void compress_uint16(
-    const std::vector<uint16_t>& input_data,
+    const uint16_t* input_data,   
+    size_t input_len,
     std::vector<int>& output_lengths,
     std::vector<uint16_t>& centers,
     std::vector<uint8_t>& codes,
     std::vector<uint8_t>& bit_signals
 ) {
-    int num_elements = input_data.size();
+    int num_elements = (int)input_len;
     int gsize = (num_elements + cmp_tblock_size * cmp_chunk - 1) / (cmp_tblock_size * cmp_chunk);
     int total_threads = gsize * cmp_tblock_size;
 
@@ -160,15 +161,15 @@ inline void compress_uint16(
 }
 
 inline void decompress_uint16(
-    const std::vector<int>& output_lengths,             // gsize
-    const std::vector<uint16_t>& centers,               // gsize
-    const std::vector<uint8_t>& codes,                  // num_elements
-    const std::vector<uint8_t>& bit_signals,            // bitstream
-    std::vector<uint16_t>& output_data                  // output: num_elements
+    const int* output_lengths,           
+    size_t gsize,                        
+    const uint16_t* centers,             
+    const uint8_t* codes,                
+    size_t num_elements,                
+    const uint8_t* bit_signals,          
+    uint16_t* output_data                
 )
 {
-    int num_elements = codes.size();
-    int gsize = output_lengths.size();
     int total_threads = gsize * cmp_tblock_size;
 
     // Step 1: Restore signal[]
@@ -212,9 +213,6 @@ inline void decompress_uint16(
         }
     }
 
-    // Step 2: Decode values
-    output_data.resize(num_elements);
-
     #pragma omp parallel for
     for (int tid = 0; tid < total_threads; ++tid) {
         int block_id = tid;
@@ -241,13 +239,14 @@ inline void decompress_uint16(
 }
 
 inline void compress_uint32(
-    const std::vector<uint32_t>& input_data,
+    const uint32_t* input_data,          
+    size_t input_len,                    
     std::vector<int>& output_lengths,
     std::vector<uint32_t>& centers,
     std::vector<uint8_t>& codes,
     std::vector<uint8_t>& bit_signals
 ) {
-    int num_elements = input_data.size();
+    int num_elements = (int)input_len;   
     int gsize = (num_elements + cmp_tblock_size * cmp_chunk - 1) / (cmp_tblock_size * cmp_chunk);
     int total_threads = gsize * cmp_tblock_size;
 
@@ -258,7 +257,6 @@ inline void compress_uint32(
 
     // static const uint8_t bitmask[8] = {0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01};
     // static const uint8_t tail_mask[8] = {0xFF, 0x7F, 0x3F, 0x1F, 0x0F, 0x07, 0x03, 0x01};
-
 
     // Center calculation: parallelizing and reducing unnecessary work
     #pragma omp parallel for
@@ -370,17 +368,16 @@ inline void compress_uint32(
     }
 }
 
-
 inline void decompress_uint32(
-    const std::vector<int>& output_lengths,             // gsize
-    const std::vector<uint32_t>& centers,               // gsize
-    const std::vector<uint8_t>& codes,                  // num_elements
-    const std::vector<uint8_t>& bit_signals,            // bitstream
-    std::vector<uint32_t>& output_data                  // output: num_elements
+    const int* output_lengths,           
+    size_t gsize,                        
+    const uint32_t* centers,             
+    const uint8_t* codes,                
+    size_t num_elements,                 
+    const uint8_t* bit_signals,          
+    uint32_t* output_data                
 )
 {
-    int num_elements = codes.size();
-    int gsize = output_lengths.size();
     int total_threads = gsize * cmp_tblock_size;
 
     // Step 1: Restore signal[]
@@ -425,7 +422,6 @@ inline void decompress_uint32(
     }
 
     // Step 2: Decode values
-    output_data.resize(num_elements);
 
     #pragma omp parallel for
     for (int tid = 0; tid < total_threads; ++tid) {
