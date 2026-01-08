@@ -4,11 +4,23 @@
 namespace mans {
 
 
-struct  MansParams {
+struct MansParams {
     uint32_t backend;       // 0: CPU, 1: GPU
     uint32_t dtype;         // 0: U16, 1: U32
     uint32_t adm_threshold; // (block max diff > adm_threshold) -> skip adm mode
+
+    // --- ADM Compression Threads Config ---
+    uint32_t adm_center_calc_threads;    // Center calculation
+    uint32_t adm_encode_threads;         // Encoding
+    uint32_t adm_warp_reduce_threads;    // Warp reduction
+    uint32_t adm_fill_tail_threads;      // Fill tail bits
+    uint32_t adm_write_back_threads;     // Write back bit signals
+
+    // --- ADM Decompression Threads Config ---
+    uint32_t adm_restore_signals_threads; // Restore signals
+    uint32_t adm_decode_values_threads;   // Decode values
 };
+    
 static_assert(sizeof(MansParams) % 4 == 0, "MansParams size must be multiple of 4 bytes");
 
 namespace Backend {

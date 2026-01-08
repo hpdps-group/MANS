@@ -132,9 +132,9 @@ void do_compress_t(
 
             if (open_benchmark) {
 
-                adm_compress_and_benchmark<T>(data_ptr, length, adm_buf, adm_size);
+                adm_compress_and_benchmark<T>(data_ptr, length, adm_buf, adm_size,params);
             } else {
-                adm_compress<T>(data_ptr, length, adm_buf, adm_size);
+                adm_compress<T>(data_ptr, length, adm_buf, adm_size,params);
             }
 
             if (adm_size > adm_cap) {
@@ -193,6 +193,8 @@ void do_decompress_t(
     size_t length,
     std::uint8_t* final_out,
     std::size_t& final_out_size,
+    const MansParams& params,
+
     bool save_adm,
     const std::string& dump_path,
     bool open_benchmark
@@ -242,9 +244,9 @@ void do_decompress_t(
             std::size_t num_elements = 0;
 
             if (open_benchmark) {
-                adm_decompress_and_benchmark<T>(pans_decomp_buf, pans_decomp_len, recovered, num_elements);
+                adm_decompress_and_benchmark<T>(pans_decomp_buf, pans_decomp_len, recovered, num_elements,params);
             } else {
-                adm_decompress<T>(pans_decomp_buf, pans_decomp_len, recovered, num_elements);
+                adm_decompress<T>(pans_decomp_buf, pans_decomp_len, recovered, num_elements,params);
             }
 
             final_out_size = num_elements * sizeof(T);
@@ -333,11 +335,11 @@ void decompress_internal(
 
     if (params.dtype == DataType::U16) {
         do_decompress_t<uint16_t>(
-            ptr, length, out, out_size, save_adm, dump_path, open_benchmark
+            ptr, length, out, out_size,params,save_adm, dump_path, open_benchmark
         );
     } else if (params.dtype == DataType::U32) {
         do_decompress_t<uint32_t>(
-            ptr, length, out, out_size, save_adm, dump_path, open_benchmark
+            ptr, length, out, out_size,params, save_adm, dump_path, open_benchmark
         );
     }
 }

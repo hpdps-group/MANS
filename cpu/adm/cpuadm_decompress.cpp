@@ -42,6 +42,9 @@ int main(int argc, char** argv) {
         std::cerr << "Error: File too small or invalid format.\n";
         return 1;
     }
+    mans::MansParams params;
+    params.adm_restore_signals_threads=32;
+    params.adm_decode_values_threads=16;
     adm::FileHeader header;
     std::memcpy(&header, merged.data(), sizeof(header));
     std::size_t num_elements = static_cast<std::size_t>(header.num_elements);
@@ -54,7 +57,8 @@ int main(int argc, char** argv) {
                 merged.data(), 
                 merged.size(), 
                 recovered.data(),
-                num_elements
+                num_elements,
+                params
             );
             
             if (!save_u16_file(output_file, recovered)) {
@@ -67,7 +71,8 @@ int main(int argc, char** argv) {
                 merged.data(), 
                 merged.size(), 
                 recovered.data(),
-                num_elements
+                num_elements,
+                params
             );
             
             if (!save_u32_file(output_file, recovered)) {

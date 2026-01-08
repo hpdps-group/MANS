@@ -29,7 +29,9 @@ void adm_compress(
     const T* input_data,                
     std::size_t input_len,             
     std::uint8_t* output,              
-    std::size_t& output_size)          
+    std::size_t& output_size,
+    const mans::MansParams& params
+    )          
 {
     std::size_t num_elements = input_len; 
     if (num_elements == 0) {
@@ -48,9 +50,9 @@ void adm_compress(
 
     // call adm compress function
     if constexpr (std::is_same_v<T, std::uint16_t>) {
-        adm::compress_uint16(input_data, input_len, output_lengths, centers, codes, bit_signals);
+        adm::compress_uint16(input_data, input_len, output_lengths, centers, codes, bit_signals,params);
     } else if constexpr (std::is_same_v<T, std::uint32_t>) {
-        adm::compress_uint32(input_data, input_len, output_lengths, centers, codes, bit_signals);
+        adm::compress_uint32(input_data, input_len, output_lengths, centers, codes, bit_signals,params);
     } else {
         static_assert(std::is_same_v<T, std::uint16_t> || std::is_same_v<T, std::uint32_t>,
                       "adm_compress only supports uint16_t and uint32_t");
@@ -91,7 +93,8 @@ void adm_decompress(
     const std::uint8_t* merged,    
     std::size_t merged_size,       
     T* recovered,
-    std::size_t& num_elements                   
+    std::size_t& num_elements,
+    const mans::MansParams& params                   
 )
 {
     if (merged_size < sizeof(adm::FileHeader)) {
@@ -140,7 +143,8 @@ void adm_decompress(
             codes, 
             num_elements, 
             bit_signals, 
-            recovered
+            recovered,
+            params
         );
     } else if constexpr (std::is_same_v<T, std::uint32_t>) {
         adm::decompress_uint32(
@@ -150,7 +154,8 @@ void adm_decompress(
             codes, 
             num_elements, 
             bit_signals, 
-            recovered
+            recovered,
+            params
         );
     } else {
         static_assert(std::is_same_v<T, std::uint16_t> || std::is_same_v<T, std::uint32_t>,
@@ -163,7 +168,8 @@ void adm_compress_and_benchmark(
     const T* input_data,             
     std::size_t input_len,           
     std::uint8_t* output,
-    std::size_t& output_size)
+    std::size_t& output_size,
+    const mans::MansParams& params)
 {
     std::size_t num_elements = input_len; 
     if (num_elements == 0) {
@@ -175,7 +181,7 @@ void adm_compress_and_benchmark(
     // This allows pre-allocating the exact amount of memory and avoids reallocations
     // during benchmarking from affecting the results.
     std::size_t exact_compressed_size = 0;
-    adm_compress<T>(input_data, input_len, nullptr, exact_compressed_size);
+    adm_compress<T>(input_data, input_len, nullptr, exact_compressed_size,params);
 
     std::vector<std::uint8_t> tmp_buf(exact_compressed_size);
     std::vector<std::uint8_t> last_tmp_buf(exact_compressed_size);
@@ -183,7 +189,7 @@ void adm_compress_and_benchmark(
     // warmup
     for (int i = 0; i < 5; ++i) {
         std::size_t tmp_sz = 0;
-        adm_compress<T>(input_data, input_len, tmp_buf.data(), tmp_sz);
+        adm_compress<T>(input_data, input_len, tmp_buf.data(), tmp_sz,params);
     }
 
     if constexpr (std::is_same_v<T, std::uint16_t>) {
@@ -201,7 +207,7 @@ void adm_compress_and_benchmark(
         std::size_t current_size = 0;
         
         auto start = std::chrono::high_resolution_clock::now();
-        adm_compress<T>(input_data, input_len, tmp_buf.data(), current_size);
+        adm_compress<T>(input_data, input_len, tmp_buf.data(), current_size,params);
         auto end   = std::chrono::high_resolution_clock::now();
         
         std::chrono::duration<double, std::milli> dur = (end - start);
@@ -246,7 +252,8 @@ void adm_decompress_and_benchmark(
     const std::uint8_t* merged,      
     std::size_t merged_size,         
     T* recovered,
-    std::size_t &num_elements)
+    std::size_t &num_elements,
+    const mans::MansParams& params)
 {
     num_elements = 0;
     if constexpr (std::is_same_v<T, std::uint16_t>) {
@@ -260,7 +267,7 @@ void adm_decompress_and_benchmark(
 
     for (int i = 0; i < times; ++i) {
         auto start = std::chrono::high_resolution_clock::now();
-        adm_decompress<T>(merged, merged_size, recovered, num_elements);
+        adm_decompress<T>(merged, merged_size, recovered, num_elements,params);
         auto end   = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> dur = (end - start);
         exe_min = std::min(exe_min, static_cast<float>(dur.count()));
@@ -276,14 +283,14 @@ void adm_decompress_and_benchmark(
 // Must be placed at the end of the .cpp file, otherwise the linker cannot find the symbols
 // ==========================================================
 
-template void adm_compress<uint16_t>(const uint16_t*, std::size_t, std::uint8_t*, std::size_t&);
-template void adm_compress<uint32_t>(const uint32_t*, std::size_t, std::uint8_t*, std::size_t&);
+template void adm_compress<uint16_t>(const uint16_t*, std::size_t, std::uint8_t*, std::size_t&,const mans::MansParams& params);
+template void adm_compress<uint32_t>(const uint32_t*, std::size_t, std::uint8_t*, std::size_t&,const mans::MansParams& params);
 
-template void adm_decompress<uint16_t>(const std::uint8_t*, std::size_t, uint16_t*, std::size_t&);
-template void adm_decompress<uint32_t>(const std::uint8_t*, std::size_t, uint32_t*, std::size_t&);
+template void adm_decompress<uint16_t>(const std::uint8_t*, std::size_t, uint16_t*, std::size_t&,const mans::MansParams& params);
+template void adm_decompress<uint32_t>(const std::uint8_t*, std::size_t, uint32_t*, std::size_t&,const mans::MansParams& params);
 
-template void adm_compress_and_benchmark<uint16_t>(const uint16_t*, std::size_t, std::uint8_t*, std::size_t&);
-template void adm_compress_and_benchmark<uint32_t>(const uint32_t*, std::size_t, std::uint8_t*, std::size_t&);
+template void adm_compress_and_benchmark<uint16_t>(const uint16_t*, std::size_t, std::uint8_t*, std::size_t&,const mans::MansParams& params);
+template void adm_compress_and_benchmark<uint32_t>(const uint32_t*, std::size_t, std::uint8_t*, std::size_t&,const mans::MansParams& params);
 
-template void adm_decompress_and_benchmark<uint16_t>(const std::uint8_t*, std::size_t, uint16_t*, std::size_t&);
-template void adm_decompress_and_benchmark<uint32_t>(const std::uint8_t*, std::size_t, uint32_t*, std::size_t&);
+template void adm_decompress_and_benchmark<uint16_t>(const std::uint8_t*, std::size_t, uint16_t*, std::size_t&,const mans::MansParams& params);
+template void adm_decompress_and_benchmark<uint32_t>(const std::uint8_t*, std::size_t, uint32_t*, std::size_t&,const mans::MansParams& params);
