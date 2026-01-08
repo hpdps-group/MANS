@@ -4,7 +4,7 @@
 namespace mans {
 
 
-struct  MansParams {
+struct MansParams {
     uint32_t backend;       // 0: CPU, 1: GPU
     uint32_t dtype;         // 0: U16, 1: U32
     uint32_t adm_threshold; // (block max diff > adm_threshold) -> skip adm mode
