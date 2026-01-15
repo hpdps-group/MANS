@@ -50,6 +50,11 @@ export HDF5_PLUGIN_PATH=$(pwd)/bin/plugins
 
 * **H5Z-MANS filter ID:** `32001`
 
+### HDF5 Notes
+
+* H5Z-MANS only supports **unsigned integer** datasets with element size **2 bytes (U16)** or **4 bytes (U32)**.
+* If your application does not find the plugin, verify `HDF5_PLUGIN_PATH` and ensure the file name is `libH5Z-MANS.so`.
+
 ## Testing & Verification
 
 A dedicated test tool `H5Z-MANS_test` is provided to verify compression integrity (Bit-Exact check) and measure compression ratio.
@@ -67,13 +72,15 @@ export HDF5_PLUGIN_PATH=<path of build>/bin/plugins
 # 2. Run Test
 # Usage: ./bin/h5z-mans/H5Z-MANS_test <config_file> <output.h5> [input.bin] [OPTIONS]
 
-```
+
 Options:
   --size <MB>        Set synthetic data size in MB (default: 256.0)
   --chunk <MB>       Set chunk size in MB (default: 32.0)
   --filter <name>    Set filter: mans, zstd, deflate, sz3 (default: mans)
+```
 
 Notes:
 * If `input.bin` is not provided, synthetic data is generated.
+* SZ3 config format can be referenced from `https://github.com/szcompressor/SZ3/blob/master/tools/sz3/sz3.config`.
 
-```
+

@@ -13,6 +13,7 @@
 #include <hdf5.h>
 // Assume the config header still exists
 #include "H5Z-MANS_config.h"
+#include "../include/sz3_config_min.h"
 
 // ==========================================
 // 1. Constants & Definitions
@@ -268,7 +269,23 @@ private:
                 std::cerr << RED << "[Error] SZ3 filter not found in HDF5_PLUGIN_PATH!" << RST << "\n";
                 std::exit(1);
             }
-            CHECK_H5(H5Pset_filter(p_id, FILTER_ID_SZ3, H5Z_FLAG_OPTIONAL, 0, NULL));
+            SZ3::Config sz3_conf;
+            static const char* sz3_ini = R"ini([GlobalSettings]
+CmprAlgo = ALGO_INTERP_LORENZO
+ErrorBoundMode = ABS
+AbsErrorBound = 1e-3
+OpenMP = YES
+
+[AlgoSettings]
+)ini";
+            sz3_conf.load_ini(sz3_ini);
+            size_t cd_nelmts = static_cast<size_t>(
+                std::ceil(sz3_conf.size_est() / 1.0 / sizeof(int)));
+            std::vector<unsigned int> cd_values(cd_nelmts, 0);
+            auto buffer = reinterpret_cast<unsigned char*>(cd_values.data());
+            auto conf_size_real = sz3_conf.save(buffer);
+            cd_nelmts = static_cast<size_t>(std::ceil(conf_size_real / 1.0 / sizeof(int)));
+            CHECK_H5(H5Pset_filter(p_id, FILTER_ID_SZ3, H5Z_FLAG_MANDATORY, cd_nelmts, cd_values.data()));
             
         } else {
             std::cerr << RED << "[Error] Unknown Filter ID requested: " << options.filter_id << RST << "\n";
