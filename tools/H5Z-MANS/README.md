@@ -1,22 +1,18 @@
 
-# H5Z-MANS: HDF5 Compression Filter Plugin For MANS
-
+# H5Z-MANS: HDF5 Compression Filter Plugin for MANS
 
 ## Features
 
 * **Dynamic Loading:** Built as a shared library (`.so` / `.dll`), allowing usage without recompiling HDF5 applications.
--  **Dual Backend:**
-- - **CPU:** Multi-threaded acceleration using OpenMP (AVX512 optimizations).
-- - **GPU:** (Experimental) NVIDIA CUDA acceleration.
-
-
-* **Configurable:** Runtime tuning of compression parameters (thresholds, data types) via filter parameters (`cd_values`).
+* **CPU Backend:** Multi-threaded acceleration using OpenMP (AVX512 optimizations).
+* **Configurable:** Runtime tuning via filter parameters (`cd_values`) generated from a config file.
+* **Data Type Support:** Unsigned 16-bit and 32-bit integer datasets only.
 
 ---
 
 ## Build Instructions
 
-This plugin is built as part of the main MANS project. Ensure the `BUILD_HDF5_PLUGIN` option is enabled.
+This plugin is built as part of the main MANS project. Ensure the `BUILD_HDF5_PLUGIN` option is enabled (default: ON) and HDF5 is installed.
 
 ```bash
 mkdir build && cd build
@@ -50,13 +46,17 @@ export HDF5_PLUGIN_PATH=$(pwd)/bin/plugins
 
 ```
 
+### Filter ID
+
+* **H5Z-MANS filter ID:** `32001`
+
 ## Testing & Verification
 
 A dedicated test tool `H5Z-MANS_test` is provided to verify compression integrity (Bit-Exact check) and measure compression ratio.
 
 ### 1. Create a Configuration File
 
-see [example.conf](example.conf)
+See [example.conf](example.conf). The config controls backend, dtype, ADM threshold, and thread counts used to populate `cd_values`.
 
 ### 2. Run the Test
 
@@ -69,6 +69,11 @@ export HDF5_PLUGIN_PATH=<path of build>/bin/plugins
 
 ```
 Options:
-  --size <GB>        Set synthetic data size (default: 0.25)
-  --filter <name>    Set filter: mans, zstd, deflate (default: mans)
-  --chunk <size>     Set chunk size in elements (default: 16777216)
+  --size <MB>        Set synthetic data size in MB (default: 256.0)
+  --chunk <MB>       Set chunk size in MB (default: 32.0)
+  --filter <name>    Set filter: mans, zstd, deflate, sz3 (default: mans)
+
+Notes:
+* If `input.bin` is not provided, synthetic data is generated.
+
+```
