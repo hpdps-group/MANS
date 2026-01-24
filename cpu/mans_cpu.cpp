@@ -96,7 +96,9 @@ void do_compress_t(
     std::size_t& final_out_size,
     bool save_adm,
     const std::string& dump_path,
-    bool open_benchmark
+    bool open_benchmark,
+    adm::AdmCompressScratch* adm_scratch,
+    bool reuse_scratch
 ) {
     uint32_t threshold = params.adm_threshold;
     if (threshold == 0) threshold = 4000;
@@ -134,7 +136,8 @@ void do_compress_t(
 
                 adm_compress_and_benchmark<T>(data_ptr, length, adm_buf, adm_size,params);
             } else {
-                adm_compress<T>(data_ptr, length, adm_buf, adm_size,params);
+                adm_compress<T>(data_ptr, length, adm_buf, adm_size, params,
+                                adm_scratch, reuse_scratch);
             }
 
             if (adm_size > adm_cap) {
@@ -197,7 +200,9 @@ void do_decompress_t(
 
     bool save_adm,
     const std::string& dump_path,
-    bool open_benchmark
+    bool open_benchmark,
+    adm::AdmDecompressScratch* adm_scratch,
+    bool reuse_scratch
 ) {
     final_out_size = 0;
 
@@ -244,9 +249,11 @@ void do_decompress_t(
             std::size_t num_elements = 0;
 
             if (open_benchmark) {
-                adm_decompress_and_benchmark<T>(pans_decomp_buf, pans_decomp_len, recovered, num_elements,params);
+                adm_decompress_and_benchmark<T>(pans_decomp_buf, pans_decomp_len,
+                                                recovered, num_elements, params);
             } else {
-                adm_decompress<T>(pans_decomp_buf, pans_decomp_len, recovered, num_elements,params);
+                adm_decompress<T>(pans_decomp_buf, pans_decomp_len, recovered,
+                                  num_elements, params, adm_scratch, reuse_scratch);
             }
 
             final_out_size = num_elements * sizeof(T);
@@ -305,7 +312,9 @@ void compress_internal(
             out_size,
             save_adm,
             dump_path,
-            open_benchmark
+            open_benchmark,
+            nullptr,
+            false
         );
     } else if (params.dtype == DataType::U32) {
         do_compress_t(
@@ -316,7 +325,50 @@ void compress_internal(
             out_size,
             save_adm,
             dump_path,
-            open_benchmark
+            open_benchmark,
+            nullptr,
+            false
+        );
+    }
+}
+
+void compress_internal(
+    const void* input_data,
+    size_t length,
+    const MansParams& params,
+    std::uint8_t* out,
+    std::size_t& out_size,
+    bool save_adm,
+    const std::string& dump_path,
+    bool open_benchmark,
+    adm::AdmCompressScratch* adm_scratch,
+    bool reuse_scratch
+) {
+    if (params.dtype == DataType::U16) {
+        do_compress_t(
+            static_cast<const uint16_t*>(input_data),
+            length,
+            params,
+            out,
+            out_size,
+            save_adm,
+            dump_path,
+            open_benchmark,
+            adm_scratch,
+            reuse_scratch
+        );
+    } else if (params.dtype == DataType::U32) {
+        do_compress_t(
+            static_cast<const uint32_t*>(input_data),
+            length,
+            params,
+            out,
+            out_size,
+            save_adm,
+            dump_path,
+            open_benchmark,
+            adm_scratch,
+            reuse_scratch
         );
     }
 }
@@ -335,11 +387,40 @@ void decompress_internal(
 
     if (params.dtype == DataType::U16) {
         do_decompress_t<uint16_t>(
-            ptr, length, out, out_size,params,save_adm, dump_path, open_benchmark
+            ptr, length, out, out_size, params, save_adm, dump_path, open_benchmark,
+            nullptr, false
         );
     } else if (params.dtype == DataType::U32) {
         do_decompress_t<uint32_t>(
-            ptr, length, out, out_size,params, save_adm, dump_path, open_benchmark
+            ptr, length, out, out_size, params, save_adm, dump_path, open_benchmark,
+            nullptr, false
+        );
+    }
+}
+
+void decompress_internal(
+    const void* input_data,
+    size_t length,
+    const MansParams& params,
+    std::uint8_t* out,
+    std::size_t& out_size,
+    bool save_adm,
+    const std::string& dump_path,
+    bool open_benchmark,
+    adm::AdmDecompressScratch* adm_scratch,
+    bool reuse_scratch
+) {
+    const uint8_t* ptr = static_cast<const uint8_t*>(input_data);
+
+    if (params.dtype == DataType::U16) {
+        do_decompress_t<uint16_t>(
+            ptr, length, out, out_size, params, save_adm, dump_path, open_benchmark,
+            adm_scratch, reuse_scratch
+        );
+    } else if (params.dtype == DataType::U32) {
+        do_decompress_t<uint32_t>(
+            ptr, length, out, out_size, params, save_adm, dump_path, open_benchmark,
+            adm_scratch, reuse_scratch
         );
     }
 }

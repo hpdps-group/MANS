@@ -24,7 +24,7 @@ uint32_t getAlignmentRoundUp(uint32_t alignment, const void* ptr) {
 
 
 __attribute__((target("avx2")))
-void processBlock(const __restrict uint8_t* in, uint32_t size, uint32_t* __restrict localHist) {
+void processBlock(const uint8_t* __restrict in, uint32_t size, uint32_t* __restrict localHist) {
     uint32_t roundUp = std::min(size, static_cast<uint32_t>(getAlignmentRoundUp(kAlign, in)));
     for (uint32_t i = 0; i < roundUp; ++i) {
         ++localHist[in[i]]; 
@@ -415,8 +415,8 @@ template <int one_bits, int BlockSize, int kStateCheckMul>
 void ansEncodeBatch_v0(
     uint8_t* __restrict__ in,
     int inSize,
-    uint32_t __restrict__ maxNumCompressedBlocks,
-    uint32_t __restrict__ uncoalescedBlockStride,
+    uint32_t maxNumCompressedBlocks,
+    uint32_t uncoalescedBlockStride,
     uint8_t* __restrict__ compressedBlocks_dev,
     uint32_t* __restrict__ compressedWords_dev,
     uint32_t* __restrict__ compressedWords_host_prefix,
@@ -646,8 +646,8 @@ template <int one_bits, int BlockSize, int kStateCheckMul>
 void ansEncodeBatch_v3(
     uint8_t* __restrict__ in,
     int inSize,
-    uint32_t __restrict__ maxNumCompressedBlocks,
-    uint32_t __restrict__ uncoalescedBlockStride,
+    uint32_t maxNumCompressedBlocks,
+    uint32_t uncoalescedBlockStride,
     uint8_t* __restrict__ compressedBlocks_dev,
     uint32_t* __restrict__ compressedWords_dev,
     uint32_t* __restrict__ compressedWords_host_prefix,
@@ -739,8 +739,8 @@ template <int one_bits, int BlockSize, int kStateCheckMul>
 void ansEncodeBatch_v4(
     uint8_t* __restrict__ in,
     int inSize,
-    uint32_t __restrict__ maxNumCompressedBlocks,
-    uint32_t __restrict__ uncoalescedBlockStride,
+    uint32_t maxNumCompressedBlocks,
+    uint32_t uncoalescedBlockStride,
     uint8_t* __restrict__ compressedBlocks_dev,
     uint32_t* __restrict__ compressedWords_dev,
     uint32_t* __restrict__ compressedWords_host_prefix,
@@ -947,4 +947,3 @@ void ansEncode(
 #undef RUN_ENCODE_ALL
 
 #endif
-

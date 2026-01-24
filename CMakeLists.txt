@@ -1,4 +1,13 @@
 cmake_minimum_required(VERSION 3.15)
+
+# Default to Intel compilers unless user already specified one.
+if(NOT DEFINED CMAKE_C_COMPILER)
+  set(CMAKE_C_COMPILER icx CACHE STRING "" FORCE)
+endif()
+if(NOT DEFINED CMAKE_CXX_COMPILER)
+  set(CMAKE_CXX_COMPILER icpx CACHE STRING "" FORCE)
+endif()
+
 project(MANS_ROOT LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -62,7 +71,7 @@ set_target_properties(mans_common PROPERTIES ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BI
 # -------------------------------
 if(BUILD_CPU)
   add_compile_definitions(MANS_ENABLE_CPU)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fopenmp -march=native")#为了编译pan_utils
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")#为了编译pan_utils
   # root dir：build/cpu
   set(cpu_root_binary_dir ${CMAKE_BINARY_DIR}/bin/cpu)
   add_library(mans_cpu_core STATIC
@@ -77,7 +86,7 @@ if(BUILD_CPU)
   )
   target_compile_options(mans_cpu_core PRIVATE 
   $<$<CONFIG:Release>:-O3>
-  -fopenmp -march=native -mavx512f)
+  -march=native -mavx512f)
   target_link_libraries(mans_cpu_core PRIVATE OpenMP::OpenMP_CXX)
   # link cpu core to common
   target_link_libraries(mans_common PRIVATE mans_cpu_core)
@@ -85,38 +94,8 @@ if(BUILD_CPU)
 
   # adm dir：build/cpu/adm
   set(cpu_adm_binary_dir ${cpu_root_binary_dir}/adm)
-
-  # compress（from cpu/adm/cpuadm_compress.cpp , exec:"compress"）
-  add_executable(cpuadm_compress 
-    cpu/adm/cpuadm_compress.cpp
-    cpu/adm/adm_utils.cpp
-    )
-  set_target_properties(cpuadm_compress PROPERTIES
-      OUTPUT_NAME            compress
-      RUNTIME_OUTPUT_DIRECTORY ${cpu_adm_binary_dir}
-      ARCHIVE_OUTPUT_DIRECTORY ${cpu_adm_binary_dir}
-      LIBRARY_OUTPUT_DIRECTORY ${cpu_adm_binary_dir}
-  )
-  target_compile_options(cpuadm_compress PRIVATE 
-  -mavx512f -fopenmp -march=native 
-  $<$<CONFIG:Release>:-O3>)
-  target_link_libraries(cpuadm_compress PRIVATE OpenMP::OpenMP_CXX)
-
-  # decompress（from cpu/adm/cpuadm_decompress.cpp，exec: decompress）
-  add_executable(cpuadm_decompress
-   cpu/adm/cpuadm_decompress.cpp
-   cpu/adm/adm_utils.cpp
-   )
-  set_target_properties(cpuadm_decompress PROPERTIES
-      OUTPUT_NAME            decompress
-      RUNTIME_OUTPUT_DIRECTORY ${cpu_adm_binary_dir}
-      ARCHIVE_OUTPUT_DIRECTORY ${cpu_adm_binary_dir}
-      LIBRARY_OUTPUT_DIRECTORY ${cpu_adm_binary_dir}
-  )
-  target_compile_options(cpuadm_decompress PRIVATE
-   -mavx512f -fopenmp -march=native 
-   $<$<CONFIG:Release>:-O3>)
-  target_link_libraries(cpuadm_decompress PRIVATE OpenMP::OpenMP_CXX)
+  set(CPU_ADM_BINARY_DIR ${cpu_adm_binary_dir})
+  add_subdirectory(cpu/adm)
 
   # ========== MANS ==========
 
@@ -143,13 +122,8 @@ if(BUILD_CPU)
 
   # ========== CPU / pans submodule ==========
   set(cpu_pans_binary_dir ${cpu_root_binary_dir}/pans)
-  set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${cpu_pans_binary_dir})
-  set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${cpu_pans_binary_dir})
+  set(CPU_PANS_BINARY_DIR ${cpu_pans_binary_dir})
   add_subdirectory(cpu/pans)
-
-  set_target_properties(cpuans_compress cpuans_decompress PROPERTIES
-      RUNTIME_OUTPUT_DIRECTORY ${cpu_pans_binary_dir}
-  )
 
 endif()
 
