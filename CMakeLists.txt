@@ -29,9 +29,9 @@ message(STATUS "==========================================")
 # =========================================================
 option(BUILD_HDF5_PLUGIN "Build HDF5 compression filter plugin (H5Z-MANS)" ON)
 message(STATUS "  *** BUILD_HDF5_PLUGIN: ${BUILD_HDF5_PLUGIN} ***")
-option(HDF5_PREFER_PARALLEL "Prefer parallel HDF5 if available" ON)
+option(HDF5_PREFER_PARALLEL "Prefer parallel HDF5 if available" OFF)
 message(STATUS "  *** HDF5_PREFER_PARALLEL: ${HDF5_PREFER_PARALLEL} ***")
-option(ENABLE_TIMING "Enable timing collection (mans_timing.h)" OFF)
+option(ENABLE_TIMING "Enable timing collection (mans_timing.h)" ON)
 message(STATUS "  *** ENABLE_TIMING: ${ENABLE_TIMING} ***")
 
 if(ENABLE_TIMING)

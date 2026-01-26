@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "../mans_defs.h"
+#include "../mans_timing.h"
 #include "mans_cpu.h"
 #include "file_utils.h"
 
@@ -22,6 +23,8 @@ int main(int argc, char** argv) {
     std::string output_file = argv[3];
     std::string save_flag   = argv[4];
     bool save_adm = (save_flag == "1");
+    MANS_TIMING_RUN_SCOPE();
+    MANS_TIMING_SCOPE("total");
 
     // 1. build MansParams
     mans::MansParams params{};
@@ -40,9 +43,12 @@ int main(int argc, char** argv) {
 
     // 2. load data
     std::vector<uint8_t> input_data;
-    if (!load_u8_file(input_file, input_data)) {
-        std::cerr << "Failed to load input file: " << input_file << "\n";
-        return 1;
+    {
+        MANS_TIMING_SCOPE("io_read");
+        if (!load_u8_file(input_file, input_data)) {
+            std::cerr << "Failed to load input file: " << input_file << "\n";
+            return 1;
+        }
     }
     if (input_data.empty()) {
         std::cerr << "Input file is empty.\n";
@@ -53,12 +59,16 @@ int main(int argc, char** argv) {
 
     // 3. Prepare output buffer
     size_t estimated_out_size = input_data.size() * 10+4096;
-    std::vector<uint8_t> output_bytes(estimated_out_size);
+    std::vector<uint8_t> output_bytes;
+    {
+        MANS_TIMING_SCOPE("alloc_output_buf");
+        output_bytes.resize(estimated_out_size);
+    }
     // out_len indicates the buffer capacity when passed in; on return it will be updated by `internal`
     // to the actual number of bytes written.
     size_t out_len = output_bytes.size(); 
     
-    // Core decompress: set debug parameters (save_adm, dump_path, open_benchmark = true)
+    // Core decompress: set debug parameters (save_adm, dump_path)
     mans::cpu::decompress_internal(
         input_data.data(),    // const void* input_data
         input_data.size(),    // size_t length
@@ -66,8 +76,7 @@ int main(int argc, char** argv) {
         output_bytes.data(),  // uint8_t* out (Raw Pointer)
         out_len,             // size_t* out_len (Capacity -> Actual size)
         save_adm,
-        output_file + ".adm", // debug path: output.u2.adm
-        true                  // open_benchmark = true
+        output_file + ".adm" // debug path: output.u2.adm
     );
 
     // 4. Resize and Save
@@ -84,13 +93,18 @@ int main(int argc, char** argv) {
     output_bytes.resize(out_len);
 
     // Note: the internal interface writes bytes directly to our buffer.
-    if (!save_u8_file(output_file, output_bytes)) {
-        std::cerr << "Failed to write output file: " << output_file << "\n";
-        return 1;
+    {
+        MANS_TIMING_SCOPE("io_write");
+        if (!save_u8_file(output_file, output_bytes)) {
+            std::cerr << "Failed to write output file: " << output_file << "\n";
+            return 1;
+        }
     }
 
     std::cout << "Mans decompress finished! Output: " << output_file 
               << " (Size: " << output_bytes.size() << ")\n";
+
+    MANS_TIMING_DUMP(output_file + ".timing.csv");
 
     return 0;
 }
