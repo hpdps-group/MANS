@@ -18,20 +18,10 @@ void compress_internal(
     std::size_t& out_size,
     bool save_adm,
     const std::string& dump_path,
-    bool open_benchmark
-);
-
-void compress_internal(
-    const void* input_data,
-    size_t length,
-    const MansParams& params,
-    std::uint8_t* out,
-    std::size_t& out_size,
-    bool save_adm,
-    const std::string& dump_path,
-    bool open_benchmark,
-    adm::AdmCompressScratch* adm_scratch,
-    bool reuse_scratch
+    adm::AdmCompressScratch* adm_scratch = nullptr,
+    bool reuse_scratch = false,
+    std::uint8_t* mans_intermediate_buf = nullptr,
+    std::size_t mans_intermediate_cap = 0
 );
 
 
@@ -43,20 +33,10 @@ void decompress_internal(
     std::size_t& out_size,
     bool save_adm,
     const std::string& dump_path,
-    bool open_benchmark
-);
-
-void decompress_internal(
-    const void* input_data,
-    size_t length,
-    const MansParams& params,
-    std::uint8_t* out,
-    std::size_t& out_size,
-    bool save_adm,
-    const std::string& dump_path,
-    bool open_benchmark,
-    adm::AdmDecompressScratch* adm_scratch,
-    bool reuse_scratch
+    adm::AdmDecompressScratch* adm_scratch = nullptr,
+    bool reuse_scratch = false,
+    std::uint8_t* mans_intermediate_buf = nullptr,
+    std::size_t mans_intermediate_cap = 0
 );
 
 }

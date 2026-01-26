@@ -15,6 +15,14 @@
 #include <immintrin.h>
 #include <omp.h>
 #include "../../mans_defs.h"
+
+#ifdef ENABLE_TIMING
+#include "../../mans_timing.h"
+#endif
+#ifndef MANS_TIMING_SCOPE
+#define MANS_TIMING_SCOPE(name) do {} while (0)
+#endif
+
 namespace adm {
 
 // ---------------- global parameters ----------------
@@ -96,18 +104,21 @@ inline void compress_uint16(
     const int bytes_per_thread = cmp_chunk * max_bytes_signal_per_ele_16b;
     const size_t tmp_bytes = static_cast<size_t>(total_threads) * bytes_per_thread;
 
-    if (reuse_scratch && scratch) {
-        scratch->prepare(gsize, total_threads, bytes_per_thread);
-        signal_length_ptr = &scratch->signal_length;
-        bit_offsets_ptr = &scratch->bit_offsets;
-        tmp_bit_signals_ptr = &scratch->tmp_bit_signals;
-    } else {
-        signal_length_local.resize(gsize);
-        bit_offsets_local.resize(total_threads);
-        tmp_bit_signals_local.assign(tmp_bytes, 0);
-        signal_length_ptr = &signal_length_local;
-        bit_offsets_ptr = &bit_offsets_local;
-        tmp_bit_signals_ptr = &tmp_bit_signals_local;
+    {
+        MANS_TIMING_SCOPE("adm_alloc_scratch");
+        if (reuse_scratch && scratch) {
+            scratch->prepare(gsize, total_threads, bytes_per_thread);
+            signal_length_ptr = &scratch->signal_length;
+            bit_offsets_ptr = &scratch->bit_offsets;
+            tmp_bit_signals_ptr = &scratch->tmp_bit_signals;
+        } else {
+            signal_length_local.resize(gsize);
+            bit_offsets_local.resize(total_threads);
+            tmp_bit_signals_local.assign(tmp_bytes, 0);
+            signal_length_ptr = &signal_length_local;
+            bit_offsets_ptr = &bit_offsets_local;
+            tmp_bit_signals_ptr = &tmp_bit_signals_local;
+        }
     }
 
     std::vector<int>& signal_length = *signal_length_ptr;
@@ -240,12 +251,15 @@ inline void decompress_uint16(
     std::vector<uint8_t> signals_local;
     std::vector<uint8_t>* signals_ptr = nullptr;
 
-    if (reuse_scratch && scratch) {
-        scratch->prepare(num_elements);
-        signals_ptr = &scratch->signals;
-    } else {
-        signals_local.assign(num_elements, 0);
-        signals_ptr = &signals_local;
+    {
+        MANS_TIMING_SCOPE("adm_alloc_scratch");
+        if (reuse_scratch && scratch) {
+            scratch->prepare(num_elements);
+            signals_ptr = &scratch->signals;
+        } else {
+            signals_local.assign(num_elements, 0);
+            signals_ptr = &signals_local;
+        }
     }
 
     std::vector<uint8_t>& signals = *signals_ptr;
@@ -340,18 +354,21 @@ inline void compress_uint32(
     const int bytes_per_thread = cmp_chunk * max_bytes_signal_per_ele_32b;
     const size_t tmp_bytes = static_cast<size_t>(total_threads) * bytes_per_thread;
 
-    if (reuse_scratch && scratch) {
-        scratch->prepare(gsize, total_threads, bytes_per_thread);
-        signal_length_ptr = &scratch->signal_length;
-        bit_offsets_ptr = &scratch->bit_offsets;
-        tmp_bit_signals_ptr = &scratch->tmp_bit_signals;
-    } else {
-        signal_length_local.assign(gsize, 0);
-        bit_offsets_local.assign(total_threads, 0);
-        tmp_bit_signals_local.assign(tmp_bytes, 0);
-        signal_length_ptr = &signal_length_local;
-        bit_offsets_ptr = &bit_offsets_local;
-        tmp_bit_signals_ptr = &tmp_bit_signals_local;
+    {
+        MANS_TIMING_SCOPE("adm_alloc_scratch");
+        if (reuse_scratch && scratch) {
+            scratch->prepare(gsize, total_threads, bytes_per_thread);
+            signal_length_ptr = &scratch->signal_length;
+            bit_offsets_ptr = &scratch->bit_offsets;
+            tmp_bit_signals_ptr = &scratch->tmp_bit_signals;
+        } else {
+            signal_length_local.assign(gsize, 0);
+            bit_offsets_local.assign(total_threads, 0);
+            tmp_bit_signals_local.assign(tmp_bytes, 0);
+            signal_length_ptr = &signal_length_local;
+            bit_offsets_ptr = &bit_offsets_local;
+            tmp_bit_signals_ptr = &tmp_bit_signals_local;
+        }
     }
 
     std::vector<int>& signal_length = *signal_length_ptr;
@@ -487,12 +504,15 @@ inline void decompress_uint32(
     std::vector<uint8_t> signals_local;
     std::vector<uint8_t>* signals_ptr = nullptr;
 
-    if (reuse_scratch && scratch) {
-        scratch->prepare(num_elements);
-        signals_ptr = &scratch->signals;
-    } else {
-        signals_local.assign(num_elements, 0);
-        signals_ptr = &signals_local;
+    {
+        MANS_TIMING_SCOPE("adm_alloc_scratch");
+        if (reuse_scratch && scratch) {
+            scratch->prepare(num_elements);
+            signals_ptr = &scratch->signals;
+        } else {
+            signals_local.assign(num_elements, 0);
+            signals_ptr = &signals_local;
+        }
     }
 
     std::vector<uint8_t>& signals = *signals_ptr;

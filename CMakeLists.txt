@@ -20,6 +20,8 @@ endif()
 
 message(STATUS "==========================================")
 message(STATUS "  *** CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE} ***")
+message(STATUS "  *** C COMPILER: ${CMAKE_C_COMPILER} ***")
+message(STATUS "  *** CXX COMPILER: ${CMAKE_CXX_COMPILER} ***")
 message(STATUS "==========================================")
 
 # =========================================================
@@ -27,6 +29,14 @@ message(STATUS "==========================================")
 # =========================================================
 option(BUILD_HDF5_PLUGIN "Build HDF5 compression filter plugin (H5Z-MANS)" ON)
 message(STATUS "  *** BUILD_HDF5_PLUGIN: ${BUILD_HDF5_PLUGIN} ***")
+option(HDF5_PREFER_PARALLEL "Prefer parallel HDF5 if available" ON)
+message(STATUS "  *** HDF5_PREFER_PARALLEL: ${HDF5_PREFER_PARALLEL} ***")
+option(ENABLE_TIMING "Enable timing collection (mans_timing.h)" OFF)
+message(STATUS "  *** ENABLE_TIMING: ${ENABLE_TIMING} ***")
+
+if(ENABLE_TIMING)
+  add_compile_definitions(ENABLE_TIMING)
+endif()
 
 # -------------------------------
 # platform control
