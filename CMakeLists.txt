@@ -130,6 +130,34 @@ if(BUILD_CPU)
   target_compile_options(cpu_mans_decompress PRIVATE $<$<CONFIG:Release>:-O3>)
   target_link_libraries(cpu_mans_decompress PRIVATE mans_cpu_core OpenMP::OpenMP_CXX)
 
+  # ========== MPI Benchmarks ==========
+  find_package(MPI REQUIRED)
+  add_executable(cpu_mans_mpi_compress
+    cpu/cpu_mans_mpi_compress.cpp
+  )
+  set_target_properties(cpu_mans_mpi_compress PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY ${cpu_root_binary_dir}
+  )
+  target_compile_options(cpu_mans_mpi_compress PRIVATE $<$<CONFIG:Release>:-O3>)
+  target_include_directories(cpu_mans_mpi_compress PRIVATE
+      ${CMAKE_SOURCE_DIR}
+      ${CMAKE_SOURCE_DIR}/tools/H5Z-MANS/include
+  )
+  target_link_libraries(cpu_mans_mpi_compress PRIVATE mans_common MPI::MPI_CXX OpenMP::OpenMP_CXX)
+
+  add_executable(cpu_mans_mpi_decompress
+    cpu/cpu_mans_mpi_decompress.cpp
+  )
+  set_target_properties(cpu_mans_mpi_decompress PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY ${cpu_root_binary_dir}
+  )
+  target_compile_options(cpu_mans_mpi_decompress PRIVATE $<$<CONFIG:Release>:-O3>)
+  target_include_directories(cpu_mans_mpi_decompress PRIVATE
+      ${CMAKE_SOURCE_DIR}
+      ${CMAKE_SOURCE_DIR}/tools/H5Z-MANS/include
+  )
+  target_link_libraries(cpu_mans_mpi_decompress PRIVATE mans_common MPI::MPI_CXX OpenMP::OpenMP_CXX)
+
   # ========== CPU / pans submodule ==========
   set(cpu_pans_binary_dir ${cpu_root_binary_dir}/pans)
   set(CPU_PANS_BINARY_DIR ${cpu_pans_binary_dir})

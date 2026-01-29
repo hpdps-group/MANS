@@ -9,10 +9,12 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <type_traits>
 #include <vector>
+#include <cstdlib>
 
 #include "../mans_defs.h" 
 #include "../mans_timing.h"
@@ -143,10 +145,13 @@ bool compress_chunks(const std::vector<T>& host_data,
     compressed_data.clear();
     compressed_data.resize(max_out_size);
     
-    std::vector<std::uint8_t> mans_intermediate_buf;
+    std::unique_ptr<std::uint8_t, decltype(&free)> mans_intermediate_buf(nullptr, &free);
+    std::size_t mans_intermediate_cap = 0;
     if (max_chunk_len > 0) {
         MANS_TIMING_SCOPE("alloc_mans_intermediate_buf");
-        mans_intermediate_buf.resize(adm_max_compressed_size<T>(max_chunk_len));
+        mans_intermediate_cap = adm_max_compressed_size<T>(max_chunk_len);
+        mans_intermediate_buf.reset(
+            static_cast<std::uint8_t*>(std::malloc(mans_intermediate_cap)));
     }
 
     std::size_t offset = 0;
@@ -167,10 +172,8 @@ bool compress_chunks(const std::vector<T>& host_data,
             output_file + ".adm",
             scratch_ptr,
             reuse_scratch,
-            nullptr,
-            0
-            // mans_intermediate_buf.data(),
-            // mans_intermediate_buf.size()
+            mans_intermediate_buf.get(),
+            mans_intermediate_cap
         );
         offset += out_size;
     }
@@ -299,7 +302,7 @@ int main(int argc, char** argv) {
                "throughput_mbps,io_ratio\n";
     }
 
-    constexpr int kIters = 11;
+    constexpr int kIters = 2;
     double total_comp_ms = 0.0;
     double total_io_read_ms = 0.0;
     double total_io_write_ms = 0.0;

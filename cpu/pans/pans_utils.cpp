@@ -2,6 +2,7 @@
 #include "pans_utils.h"
 #include "CpuANSEncode.h"
 #include "CpuANSDecode.h"
+#include "../../mans_timing.h"
 
 #include <iostream>
 #include <vector>
@@ -33,30 +34,42 @@ void pans_compress(
     uint32_t batchSize = static_cast<uint32_t>(inputLen);
     const int precision = PANS_PRECISION;
 
-    uint32_t* outCompressedSize = (uint32_t*)malloc(sizeof(uint32_t));
-    uint8_t* encPtrs = (uint8_t*)malloc(getMaxCompressedSize(inputLen));
-    ANSCoalescedHeader* headerOut = (ANSCoalescedHeader*)encPtrs;
+    uint32_t* outCompressedSize = nullptr;
+    uint8_t* encPtrs = nullptr;
+    ANSCoalescedHeader* headerOut = nullptr;
     uint32_t maxNumCompressedBlocks;
 
     uint32_t maxUncompressedWords = batchSize / sizeof(ANSDecodedT);
     maxNumCompressedBlocks =
         (maxUncompressedWords + kDefaultBlockSize - 1) / kDefaultBlockSize;
     
-    uint4* table = (uint4*)malloc(sizeof(uint4) * kNumSymbols);
-    uint32_t* tempHistogram = (uint32_t*)malloc(sizeof(uint32_t) * kNumSymbols);
+    uint4* table = nullptr;
+    uint32_t* tempHistogram = nullptr;
     uint32_t uncoalescedBlockStride = getMaxBlockSizeUnCoalesced(kDefaultBlockSize);
-    uint8_t* compressedBlocks_host = (uint8_t*)std::aligned_alloc(
-        kBlockAlignment,
-        sizeof(uint8_t) * maxNumCompressedBlocks * uncoalescedBlockStride);
-    uint32_t* compressedWords_host = (uint32_t*)std::aligned_alloc(
-        kBlockAlignment,
-        sizeof(uint32_t) * maxNumCompressedBlocks);
-    uint32_t* compressedWords_host_prefix = (uint32_t*)std::aligned_alloc(
-        kBlockAlignment,
-        sizeof(uint32_t) * maxNumCompressedBlocks);
-    uint32_t* compressedWordsPrefix_host = (uint32_t*)std::aligned_alloc(
-        kBlockAlignment,
-        sizeof(uint32_t) * maxNumCompressedBlocks);
+    uint8_t* compressedBlocks_host = nullptr;
+    uint32_t* compressedWords_host = nullptr;
+    uint32_t* compressedWords_host_prefix = nullptr;
+    uint32_t* compressedWordsPrefix_host = nullptr;
+    {
+        MANS_TIMING_SCOPE("alloc_pans_compress");
+        outCompressedSize = (uint32_t*)malloc(sizeof(uint32_t));
+        encPtrs = (uint8_t*)malloc(getMaxCompressedSize(inputLen));
+        headerOut = (ANSCoalescedHeader*)encPtrs;
+        table = (uint4*)malloc(sizeof(uint4) * kNumSymbols);
+        tempHistogram = (uint32_t*)malloc(sizeof(uint32_t) * kNumSymbols);
+        compressedBlocks_host = (uint8_t*)std::aligned_alloc(
+            kBlockAlignment,
+            sizeof(uint8_t) * maxNumCompressedBlocks * uncoalescedBlockStride);
+        compressedWords_host = (uint32_t*)std::aligned_alloc(
+            kBlockAlignment,
+            sizeof(uint32_t) * maxNumCompressedBlocks);
+        compressedWords_host_prefix = (uint32_t*)std::aligned_alloc(
+            kBlockAlignment,
+            sizeof(uint32_t) * maxNumCompressedBlocks);
+        compressedWordsPrefix_host = (uint32_t*)std::aligned_alloc(
+            kBlockAlignment,
+            sizeof(uint32_t) * maxNumCompressedBlocks);
+    }
     
     auto start = std::chrono::high_resolution_clock::now();  
     ansEncode(
@@ -285,16 +298,23 @@ void pans_decompress(
     const int precision = PANS_PRECISION;
 
 
-    uint8_t* decPtrs = (uint8_t*)malloc(sizeof(uint8_t) * batchSize);
-    uint32_t* symbol = (uint32_t*)std::aligned_alloc(
-        kBlockAlignment,
-        sizeof(uint32_t) * (1u << precision));
-    uint32_t* pdf = (uint32_t*)std::aligned_alloc(
-        kBlockAlignment,
-        sizeof(uint32_t) * (1u << precision));
-    uint32_t* cdf = (uint32_t*)std::aligned_alloc(
-        kBlockAlignment,
-        sizeof(uint32_t) * (1u << precision));
+    uint8_t* decPtrs = nullptr;
+    uint32_t* symbol = nullptr;
+    uint32_t* pdf = nullptr;
+    uint32_t* cdf = nullptr;
+    {
+        MANS_TIMING_SCOPE("alloc_pans_decompress");
+        decPtrs = (uint8_t*)malloc(sizeof(uint8_t) * batchSize);
+        symbol = (uint32_t*)std::aligned_alloc(
+            kBlockAlignment,
+            sizeof(uint32_t) * (1u << precision));
+        pdf = (uint32_t*)std::aligned_alloc(
+            kBlockAlignment,
+            sizeof(uint32_t) * (1u << precision));
+        cdf = (uint32_t*)std::aligned_alloc(
+            kBlockAlignment,
+            sizeof(uint32_t) * (1u << precision));
+    }
     
     auto start = std::chrono::high_resolution_clock::now();
     ansDecode(

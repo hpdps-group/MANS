@@ -3,6 +3,12 @@
 #include <cstdint>
 #include <cstddef>
 #include "mans_defs.h"
+#include "mans_data_gen.h"
+
+namespace adm {
+struct AdmCompressScratch;
+struct AdmDecompressScratch;
+} // namespace adm
 
 namespace mans {
 
@@ -15,6 +21,18 @@ void compress(
     size_t & out_size
 );
 
+void compress(
+    const void* input_data,
+    size_t length,
+    const MansParams& params,
+    uint8_t* out,
+    size_t& out_size,
+    adm::AdmCompressScratch* adm_scratch,
+    bool reuse_scratch,
+    uint8_t* mans_intermediate_buf = nullptr,
+    size_t mans_intermediate_cap = 0
+);
+
 
 void decompress(
     const void* input_data, 
@@ -22,6 +40,29 @@ void decompress(
     const MansParams& params, 
     uint8_t* out,
     size_t & out_size
+);
+
+void decompress(
+    const void* input_data,
+    size_t length,
+    const MansParams& params,
+    uint8_t* out,
+    size_t& out_size,
+    adm::AdmDecompressScratch* adm_scratch,
+    bool reuse_scratch,
+    uint8_t* mans_intermediate_buf = nullptr,
+    size_t mans_intermediate_cap = 0
+);
+
+std::size_t get_mans_max_compress_bytes_p(
+    std::size_t num_elements,
+    const MansParams& params
+);
+
+std::size_t get_mans_exact_decompress_bytes_p(
+    const void* compressed_data,
+    std::size_t compressed_len,
+    const MansParams& params
 );
 
 } // namespace mans

@@ -11,6 +11,8 @@
 #include <numeric>
 #include <chrono>
 #include <iomanip>
+#include <cstdlib>
+#include <memory>
 
 #include <immintrin.h>
 #include <omp.h>
@@ -46,33 +48,78 @@ struct FileHeader {
 };
 
 struct AdmCompressScratch {
-    std::vector<int> signal_length;
-    std::vector<int> bit_offsets;
-    std::vector<uint8_t> tmp_bit_signals;
+    int* signal_length = nullptr;
+    int* bit_offsets = nullptr;
+    uint8_t* tmp_bit_signals = nullptr;
+    int signal_length_cap = 0;
+    int bit_offsets_cap = 0;
+    size_t tmp_bit_signals_cap = 0;
+
+    ~AdmCompressScratch() {
+        std::free(signal_length);
+        std::free(bit_offsets);
+        std::free(tmp_bit_signals);
+    }
 
     void prepare(int gsize, int total_threads, int bytes_per_thread) {
-        if ((int)signal_length.size() < gsize) {
-            signal_length.resize(gsize);
-        }
-        if ((int)bit_offsets.size() < total_threads) {
-            bit_offsets.resize(total_threads);
-        }
         const size_t needed = static_cast<size_t>(total_threads) * bytes_per_thread;
-        if (tmp_bit_signals.size() < needed) {
-            tmp_bit_signals.resize(needed);
+        {
+            MANS_TIMING_SCOPE("adm_alloc_scratch");
+        if (signal_length_cap < gsize) {
+            int* new_buf = static_cast<int*>(
+                std::realloc(signal_length, sizeof(int) * gsize));
+            if (new_buf) {
+                signal_length = new_buf;
+                signal_length_cap = gsize;
+            }
         }
-        std::fill(tmp_bit_signals.begin(), tmp_bit_signals.begin() + needed, 0);
+        if (bit_offsets_cap < total_threads) {
+            int* new_buf = static_cast<int*>(
+                std::realloc(bit_offsets, sizeof(int) * total_threads));
+            if (new_buf) {
+                bit_offsets = new_buf;
+                bit_offsets_cap = total_threads;
+            }
+        }
+        if (tmp_bit_signals_cap < needed) {
+            uint8_t* new_buf = static_cast<uint8_t*>(
+                std::realloc(tmp_bit_signals, needed));
+            if (new_buf) {
+                tmp_bit_signals = new_buf;
+                tmp_bit_signals_cap = needed;
+            }
+        }
+        }
+        {
+            MANS_TIMING_SCOPE("adm_fill_scratch");
+            if (tmp_bit_signals) {
+                std::fill(tmp_bit_signals, tmp_bit_signals + needed, 0);
+            }
+        }
     }
 };
 
 struct AdmDecompressScratch {
-    std::vector<uint8_t> signals;
+    uint8_t* signals = nullptr;
+    size_t signals_cap = 0;
+
+    ~AdmDecompressScratch() {
+        std::free(signals);
+    }
 
     void prepare(size_t num_elements) {
-        if (signals.size() < num_elements) {
-            signals.resize(num_elements);
+        {
+            MANS_TIMING_SCOPE("adm_alloc_scratch");
+        if (signals_cap < num_elements) {
+            uint8_t* new_buf = static_cast<uint8_t*>(
+                std::realloc(signals, num_elements));
+            if (new_buf) {
+                signals = new_buf;
+                signals_cap = num_elements;
+            }
         }
-        std::fill(signals.begin(), signals.begin() + num_elements, 0);
+        }
+        (void)num_elements;
     }
 };
 
@@ -93,37 +140,48 @@ inline void compress_uint16(
     int gsize = (num_elements + cmp_tblock_size * cmp_chunk - 1) / (cmp_tblock_size * cmp_chunk);
     int total_threads = gsize * cmp_tblock_size;
 
-    std::vector<int> signal_length_local;
-    std::vector<int> bit_offsets_local;
-    std::vector<uint8_t> tmp_bit_signals_local;
+    std::unique_ptr<int, decltype(&free)> signal_length_local(nullptr, &free);
+    std::unique_ptr<int, decltype(&free)> bit_offsets_local(nullptr, &free);
+    std::unique_ptr<uint8_t, decltype(&free)> tmp_bit_signals_local(nullptr, &free);
 
-    std::vector<int>* signal_length_ptr = nullptr;
-    std::vector<int>* bit_offsets_ptr = nullptr;
-    std::vector<uint8_t>* tmp_bit_signals_ptr = nullptr;
+    int* signal_length_ptr = nullptr;
+    int* bit_offsets_ptr = nullptr;
+    uint8_t* tmp_bit_signals_ptr = nullptr;
 
     const int bytes_per_thread = cmp_chunk * max_bytes_signal_per_ele_16b;
     const size_t tmp_bytes = static_cast<size_t>(total_threads) * bytes_per_thread;
 
-    {
-        MANS_TIMING_SCOPE("adm_alloc_scratch");
-        if (reuse_scratch && scratch) {
-            scratch->prepare(gsize, total_threads, bytes_per_thread);
-            signal_length_ptr = &scratch->signal_length;
-            bit_offsets_ptr = &scratch->bit_offsets;
-            tmp_bit_signals_ptr = &scratch->tmp_bit_signals;
-        } else {
-            signal_length_local.resize(gsize);
-            bit_offsets_local.resize(total_threads);
-            tmp_bit_signals_local.assign(tmp_bytes, 0);
-            signal_length_ptr = &signal_length_local;
-            bit_offsets_ptr = &bit_offsets_local;
-            tmp_bit_signals_ptr = &tmp_bit_signals_local;
+    if (reuse_scratch && scratch) {
+        scratch->prepare(gsize, total_threads, bytes_per_thread);
+        signal_length_ptr = scratch->signal_length;
+        bit_offsets_ptr = scratch->bit_offsets;
+        tmp_bit_signals_ptr = scratch->tmp_bit_signals;
+    } else {
+        {
+            MANS_TIMING_SCOPE("adm_alloc_scratch");
+            signal_length_local.reset(
+                static_cast<int*>(std::malloc(sizeof(int) * gsize)));
+            bit_offsets_local.reset(
+                static_cast<int*>(std::malloc(sizeof(int) * total_threads)));
+            tmp_bit_signals_local.reset(
+                static_cast<uint8_t*>(std::malloc(tmp_bytes)));
         }
+        if (!signal_length_local || !bit_offsets_local || !tmp_bit_signals_local) {
+            std::cerr << "Failed to allocate ADM scratch buffers.\n";
+            return;
+        }
+        {
+            MANS_TIMING_SCOPE("adm_fill_scratch");
+            std::memset(tmp_bit_signals_local.get(), 0, tmp_bytes);
+        }
+        signal_length_ptr = signal_length_local.get();
+        bit_offsets_ptr = bit_offsets_local.get();
+        tmp_bit_signals_ptr = tmp_bit_signals_local.get();
     }
 
-    std::vector<int>& signal_length = *signal_length_ptr;
-    std::vector<int>& bit_offsets = *bit_offsets_ptr;
-    std::vector<uint8_t>& tmp_bit_signals = *tmp_bit_signals_ptr;
+    int* signal_length = signal_length_ptr;
+    int* bit_offsets = bit_offsets_ptr;
+    uint8_t* tmp_bit_signals = tmp_bit_signals_ptr;
     // Center calculation: parallelizing and reducing unnecessary work
     #pragma omp parallel for num_threads(params.adm_center_calc_threads)
     for (int warp = 0; warp < gsize; ++warp) {
@@ -147,10 +205,7 @@ inline void compress_uint16(
         int lane = thread_idx % cmp_tblock_size;
         int base_idx = warp * cmp_tblock_size * cmp_chunk + lane * cmp_chunk;
 
-        if (base_idx >= num_elements) {
-            bit_offsets[thread_idx] = 0;
-            continue;
-        }
+        if (base_idx >= num_elements) continue;
         int center = centers[warp];
 
         uint8_t* bit_out = &tmp_bit_signals[thread_idx * bytes_per_thread];
@@ -248,21 +303,23 @@ inline void decompress_uint16(
     int total_threads = gsize * cmp_tblock_size;
 
     // Step 1: Restore signal[]
-    std::vector<uint8_t> signals_local;
-    std::vector<uint8_t>* signals_ptr = nullptr;
+    std::unique_ptr<uint8_t, decltype(&free)> signals_local(nullptr, &free);
+    uint8_t* signals_ptr = nullptr;
 
-    {
+    if (reuse_scratch && scratch) {
+        scratch->prepare(num_elements);
+        signals_ptr = scratch->signals;
+    } else {
         MANS_TIMING_SCOPE("adm_alloc_scratch");
-        if (reuse_scratch && scratch) {
-            scratch->prepare(num_elements);
-            signals_ptr = &scratch->signals;
-        } else {
-            signals_local.assign(num_elements, 0);
-            signals_ptr = &signals_local;
+        signals_local.reset(static_cast<uint8_t*>(std::malloc(num_elements)));
+        if (!signals_local) {
+            std::cerr << "Failed to allocate ADM scratch buffer.\n";
+            return;
         }
+        signals_ptr = signals_local.get();
     }
 
-    std::vector<uint8_t>& signals = *signals_ptr;
+    uint8_t* signals = signals_ptr;
 
     #pragma omp parallel for num_threads(params.adm_restore_signals_threads)
     for (int tid = 0; tid < total_threads; ++tid) {
@@ -343,37 +400,48 @@ inline void compress_uint32(
     int gsize = (num_elements + cmp_tblock_size * cmp_chunk - 1) / (cmp_tblock_size * cmp_chunk);
     int total_threads = gsize * cmp_tblock_size;
 
-    std::vector<int> signal_length_local;
-    std::vector<int> bit_offsets_local;
-    std::vector<uint8_t> tmp_bit_signals_local;
+    std::unique_ptr<int, decltype(&free)> signal_length_local(nullptr, &free);
+    std::unique_ptr<int, decltype(&free)> bit_offsets_local(nullptr, &free);
+    std::unique_ptr<uint8_t, decltype(&free)> tmp_bit_signals_local(nullptr, &free);
 
-    std::vector<int>* signal_length_ptr = nullptr;
-    std::vector<int>* bit_offsets_ptr = nullptr;
-    std::vector<uint8_t>* tmp_bit_signals_ptr = nullptr;
+    int* signal_length_ptr = nullptr;
+    int* bit_offsets_ptr = nullptr;
+    uint8_t* tmp_bit_signals_ptr = nullptr;
 
     const int bytes_per_thread = cmp_chunk * max_bytes_signal_per_ele_32b;
     const size_t tmp_bytes = static_cast<size_t>(total_threads) * bytes_per_thread;
 
-    {
-        MANS_TIMING_SCOPE("adm_alloc_scratch");
-        if (reuse_scratch && scratch) {
-            scratch->prepare(gsize, total_threads, bytes_per_thread);
-            signal_length_ptr = &scratch->signal_length;
-            bit_offsets_ptr = &scratch->bit_offsets;
-            tmp_bit_signals_ptr = &scratch->tmp_bit_signals;
-        } else {
-            signal_length_local.assign(gsize, 0);
-            bit_offsets_local.assign(total_threads, 0);
-            tmp_bit_signals_local.assign(tmp_bytes, 0);
-            signal_length_ptr = &signal_length_local;
-            bit_offsets_ptr = &bit_offsets_local;
-            tmp_bit_signals_ptr = &tmp_bit_signals_local;
+    if (reuse_scratch && scratch) {
+        scratch->prepare(gsize, total_threads, bytes_per_thread);
+        signal_length_ptr = scratch->signal_length;
+        bit_offsets_ptr = scratch->bit_offsets;
+        tmp_bit_signals_ptr = scratch->tmp_bit_signals;
+    } else {
+        {
+            MANS_TIMING_SCOPE("adm_alloc_scratch");
+            signal_length_local.reset(
+                static_cast<int*>(std::malloc(sizeof(int) * gsize)));
+            bit_offsets_local.reset(
+                static_cast<int*>(std::malloc(sizeof(int) * total_threads)));
+            tmp_bit_signals_local.reset(
+                static_cast<uint8_t*>(std::malloc(tmp_bytes)));
         }
+        if (!signal_length_local || !bit_offsets_local || !tmp_bit_signals_local) {
+            std::cerr << "Failed to allocate ADM scratch buffers.\n";
+            return;
+        }
+        {
+            MANS_TIMING_SCOPE("adm_fill_scratch");
+            std::memset(tmp_bit_signals_local.get(), 0, tmp_bytes);
+        }
+        signal_length_ptr = signal_length_local.get();
+        bit_offsets_ptr = bit_offsets_local.get();
+        tmp_bit_signals_ptr = tmp_bit_signals_local.get();
     }
 
-    std::vector<int>& signal_length = *signal_length_ptr;
-    std::vector<int>& bit_offsets = *bit_offsets_ptr;
-    std::vector<uint8_t>& tmp_bit_signals = *tmp_bit_signals_ptr;
+    int* signal_length = signal_length_ptr;
+    int* bit_offsets = bit_offsets_ptr;
+    uint8_t* tmp_bit_signals = tmp_bit_signals_ptr;
 
     // static const uint8_t bitmask[8] = {0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01};
     // static const uint8_t tail_mask[8] = {0xFF, 0x7F, 0x3F, 0x1F, 0x0F, 0x07, 0x03, 0x01};
@@ -401,7 +469,10 @@ inline void compress_uint32(
         int lane = thread_idx % cmp_tblock_size;
         int base_idx = warp * cmp_tblock_size * cmp_chunk + lane * cmp_chunk;
 
-        if (base_idx >= num_elements) continue;
+        if (base_idx >= num_elements) {
+            bit_offsets[thread_idx] = 0;
+            continue;
+        }
         int center = centers[warp];
 
         uint8_t* bit_out = &tmp_bit_signals[thread_idx * cmp_chunk * max_bytes_signal_per_ele_32b];
@@ -501,21 +572,23 @@ inline void decompress_uint32(
     int total_threads = gsize * cmp_tblock_size;
 
     // Step 1: Restore signal[]
-    std::vector<uint8_t> signals_local;
-    std::vector<uint8_t>* signals_ptr = nullptr;
+    std::unique_ptr<uint8_t, decltype(&free)> signals_local(nullptr, &free);
+    uint8_t* signals_ptr = nullptr;
 
-    {
+    if (reuse_scratch && scratch) {
+        scratch->prepare(num_elements);
+        signals_ptr = scratch->signals;
+    } else {
         MANS_TIMING_SCOPE("adm_alloc_scratch");
-        if (reuse_scratch && scratch) {
-            scratch->prepare(num_elements);
-            signals_ptr = &scratch->signals;
-        } else {
-            signals_local.assign(num_elements, 0);
-            signals_ptr = &signals_local;
+        signals_local.reset(static_cast<uint8_t*>(std::malloc(num_elements)));
+        if (!signals_local) {
+            std::cerr << "Failed to allocate ADM scratch buffer.\n";
+            return;
         }
+        signals_ptr = signals_local.get();
     }
 
-    std::vector<uint8_t>& signals = *signals_ptr;
+    uint8_t* signals = signals_ptr;
 
     #pragma omp parallel for num_threads(params.adm_restore_signals_threads)
     for (int tid = 0; tid < total_threads; ++tid) {

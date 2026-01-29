@@ -69,8 +69,11 @@ static size_t H5Z_filter_mans(unsigned int flags, size_t cd_nelmts,
             // ============================
             // Decompress Path
             // ============================
-            dst_capacity = nbytes * 10;
-            if (dst_capacity < 1024) dst_capacity = 1024; 
+            dst_capacity = mans::get_mans_exact_decompress_bytes_p(*buf, nbytes, *params);
+            if (dst_capacity == 0) {
+                std::cerr << "[H5Z-MANS Error] Failed to determine exact decompressed size.\n";
+                return 0;
+            }
             
             dst_buf = safe_malloc(dst_capacity);
             if (!dst_buf) return 0;
@@ -97,8 +100,8 @@ static size_t H5Z_filter_mans(unsigned int flags, size_t cd_nelmts,
             }
             size_t num_elements = nbytes / elem_size;
 
-            // Allocation: Input size + Overhead (4KB safe margin)
-            dst_capacity = nbytes*2 + 1024;
+            // Allocation: worst-case bound for MANS (covers ADM + PANS path)
+            dst_capacity = mans::get_mans_max_compress_bytes_p(num_elements, *params);
             dst_buf = safe_malloc(dst_capacity);
             if (!dst_buf) return 0;
 
