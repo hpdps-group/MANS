@@ -5,21 +5,8 @@
 #include "mans_defs.h"
 #include "mans_data_gen.h"
 
-namespace adm {
-struct AdmCompressScratch;
-struct AdmDecompressScratch;
-} // namespace adm
-
 namespace mans {
 
-
-void compress(
-    const void* input_data, 
-    size_t length, 
-    const MansParams& params, 
-    uint8_t* out,
-    size_t & out_size
-);
 
 void compress(
     const void* input_data,
@@ -27,29 +14,17 @@ void compress(
     const MansParams& params,
     uint8_t* out,
     size_t& out_size,
-    adm::AdmCompressScratch* adm_scratch,
-    bool reuse_scratch,
     uint8_t* mans_intermediate_buf = nullptr,
     size_t mans_intermediate_cap = 0
 );
 
 
 void decompress(
-    const void* input_data, 
-    size_t length,
-    const MansParams& params, 
-    uint8_t* out,
-    size_t & out_size
-);
-
-void decompress(
     const void* input_data,
     size_t length,
     const MansParams& params,
     uint8_t* out,
     size_t& out_size,
-    adm::AdmDecompressScratch* adm_scratch,
-    bool reuse_scratch,
     uint8_t* mans_intermediate_buf = nullptr,
     size_t mans_intermediate_cap = 0
 );

@@ -125,7 +125,6 @@ bool compress_chunks(const std::vector<T>& host_data,
                      std::size_t chunk_elements,
                      bool save_adm,
                      const std::string& output_file,
-                     bool reuse_scratch,
                      std::vector<std::uint8_t>& compressed_data,
                      double& comp_ms) {
     std::vector<ChunkInfo> chunks = build_chunks(host_data.size(), chunk_elements);
@@ -156,8 +155,6 @@ bool compress_chunks(const std::vector<T>& host_data,
 
     std::size_t offset = 0;
     auto start = std::chrono::high_resolution_clock::now();
-    adm::AdmCompressScratch scratch;
-    adm::AdmCompressScratch* scratch_ptr = reuse_scratch ? &scratch : nullptr;
 
     for (std::size_t i = 0; i < chunks.size(); ++i) {
         const auto& chunk = chunks[i];
@@ -170,8 +167,6 @@ bool compress_chunks(const std::vector<T>& host_data,
             out_size,
             save_adm,
             output_file + ".adm",
-            scratch_ptr,
-            reuse_scratch,
             mans_intermediate_buf.get(),
             mans_intermediate_cap
         );
@@ -196,7 +191,7 @@ int main(int argc, char** argv) {
         std::cerr << kAnsiRed << "Use: " << kAnsiReset << argv[0] 
                   << " <u2|u4> <input_file> <output_bin_file> <save_adm(0|1)>"
                   << " [--threshold 4000] [--chunk-mb 0.0]"
-                  << " [--threads 32,32,32,32,32,32,32] [--adm-reuse-scratch]"
+                  << " [--threads 32,32,32,32,32,32,32]"
                   << " [--csv out.csv]\n";
         return 1;
     }
@@ -213,7 +208,6 @@ int main(int argc, char** argv) {
     std::string csv_path;
     std::string threads_arg;
     bool has_threads = false;
-    bool reuse_scratch = false;
 
     for (int i = 5; i < argc; ++i) {
         std::string arg = argv[i];
@@ -224,8 +218,6 @@ int main(int argc, char** argv) {
         } else if (arg == "--threads" && i + 1 < argc) {
             threads_arg = argv[++i];
             has_threads = true;
-        } else if (arg == "--adm-reuse-scratch") {
-            reuse_scratch = true;
         } else if (arg == "--csv" && i + 1 < argc) {
             csv_path = argv[++i];
         }
@@ -283,9 +275,6 @@ int main(int argc, char** argv) {
     if (has_threads) {
         std::cout << "  " << kAnsiCyan << "Threads" << kAnsiReset << ": " << threads_arg << "\n";
     }
-    std::cout << "  " << kAnsiCyan << "ADM reuse scratch" << kAnsiReset << ": "
-              << (reuse_scratch ? kAnsiGreen : kAnsiYellow)
-              << (reuse_scratch ? "yes" : "no") << kAnsiReset << "\n";
     if (!csv_path.empty()) {
         std::cout << "  " << kAnsiCyan << "CSV output" << kAnsiReset << ": " << csv_path << "\n";
     }
@@ -343,7 +332,7 @@ int main(int argc, char** argv) {
             chunk_bytes = chunk_elements_local * sizeof(uint16_t);
 
             ok = compress_chunks<uint16_t>(host_data, params, chunk_elements_local,
-                                           save_adm, output_file, reuse_scratch,
+                                           save_adm, output_file,
                                            compressed_data, comp_ms);
         } else { // U32
             std::vector<uint32_t> host_data;
@@ -370,7 +359,7 @@ int main(int argc, char** argv) {
             chunk_bytes = chunk_elements_local * sizeof(uint32_t);
 
             ok = compress_chunks<uint32_t>(host_data, params, chunk_elements_local,
-                                           save_adm, output_file, reuse_scratch,
+                                           save_adm, output_file,
                                            compressed_data, comp_ms);
         }
 
@@ -410,7 +399,6 @@ int main(int argc, char** argv) {
               << "dtype=" << dtype_str
               << ", threshold=" << threshold
               << ", chunk_bytes=" << chunk_bytes
-              << ", reuse_scratch=" << (reuse_scratch ? "yes" : "no")
               << "\n";
     std::cout << kAnsiBlue << "Avg comp ms" << kAnsiReset << ": "
               << std::fixed << std::setprecision(3) << avg_comp_ms

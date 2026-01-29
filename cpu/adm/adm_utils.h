@@ -14,9 +14,7 @@ void adm_compress(
     std::size_t input_len,
     std::uint8_t* output,
     std::size_t& output_size,
-    const mans::MansParams& params,
-    adm::AdmCompressScratch* scratch = nullptr,
-    bool reuse_scratch = false
+    const mans::MansParams& params
 );
 
 template<typename T>
@@ -25,9 +23,7 @@ void adm_decompress(
     std::size_t merged_size,
     T* recovered,
     std::size_t& num_elements,
-    const mans::MansParams& params,
-    adm::AdmDecompressScratch* scratch = nullptr,
-    bool reuse_scratch = false
+    const mans::MansParams& params
 );
 
 template<typename T>

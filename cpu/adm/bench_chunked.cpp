@@ -116,16 +116,10 @@ RunStats run_once(const std::vector<T>& input,
                   const std::vector<ChunkInfo>& chunks,
                   std::vector<std::uint8_t>& compressed_blob,
                   std::vector<T>& recovered,
-                  const mans::MansParams& params,
-                  bool reuse_scratch) {
+                  const mans::MansParams& params) {
     RunStats stats;
     std::vector<std::size_t> comp_sizes(chunks.size(), 0);
     std::vector<std::size_t> comp_offsets(chunks.size(), 0);
-
-    adm::AdmCompressScratch comp_scratch;
-    adm::AdmCompressScratch* comp_scratch_ptr = reuse_scratch ? &comp_scratch : nullptr;
-    adm::AdmDecompressScratch decomp_scratch;
-    adm::AdmDecompressScratch* decomp_scratch_ptr = reuse_scratch ? &decomp_scratch : nullptr;
 
     std::size_t offset = 0;
     auto comp_start = std::chrono::high_resolution_clock::now();
@@ -134,7 +128,7 @@ RunStats run_once(const std::vector<T>& input,
         std::size_t out_size = 0;
         adm_compress<T>(input.data() + chunk.offset, chunk.len,
                         compressed_blob.data() + offset, out_size,
-                        params, comp_scratch_ptr, reuse_scratch);
+                        params);
         comp_sizes[i] = out_size;
         comp_offsets[i] = offset;
         offset += out_size;
@@ -150,7 +144,7 @@ RunStats run_once(const std::vector<T>& input,
         std::size_t recovered_len = 0;
         adm_decompress<T>(compressed_blob.data() + comp_offsets[i],
                           comp_sizes[i], recovered.data(), recovered_len,
-                          params, decomp_scratch_ptr, reuse_scratch);
+                          params);
         if (recovered_len != chunk.len ||
             std::memcmp(recovered.data(), input.data() + chunk.offset,
                         chunk.len * sizeof(T)) != 0) {
@@ -183,7 +177,6 @@ template <typename T>
 int run_bench_for_type(const std::vector<T>& input,
                        const std::vector<double>& chunks_mb,
                        mans::MansParams& params,
-                       bool use_adm_reuse_scratch,
                        std::ofstream* csv) {
     if (input.empty()) {
         std::cerr << "Input file is empty.\n";
@@ -224,7 +217,7 @@ int run_bench_for_type(const std::vector<T>& input,
 
         for (int iter = 0; iter < kIters; ++iter) {
             RunStats stats = run_once<T>(input, chunks, compressed_blob, recovered,
-                                         params, use_adm_reuse_scratch);
+                                         params);
             if (!stats.ok) {
                 std::size_t chunk_bytes = chunk_elements * sizeof(T);
                 std::string label = format_chunk_label(chunk_bytes);
@@ -281,7 +274,7 @@ int main(int argc, char** argv) {
         std::cerr << "Usage: " << argv[0]
                   << " <-u2|-u4> <input.bin> [--chunks 0.125,0.25,0.5,1,2,8,256]"
                   << " [--threads 32,32,32,32,32,16,16] [--csv out.csv]"
-                  << " [--adm-reuse-scratch]\n";
+                  << "\n";
         return 1;
     }
 
@@ -291,7 +284,6 @@ int main(int argc, char** argv) {
     std::string csv_path;
     std::string threads_arg;
     bool has_threads = false;
-    bool use_adm_reuse_scratch = false;
 
     for (int i = 3; i < argc; ++i) {
         std::string arg = argv[i];
@@ -302,8 +294,6 @@ int main(int argc, char** argv) {
             has_threads = true;
         } else if (arg == "--csv" && i + 1 < argc) {
             csv_path = argv[++i];
-        } else if (arg == "--adm-reuse-scratch") {
-            use_adm_reuse_scratch = true;
         }
     }
     std::cout << "Command-line arguments:\n";
@@ -316,7 +306,7 @@ int main(int argc, char** argv) {
     if (!csv_path.empty()) {
         std::cout << "  CSV output: " << csv_path << "\n";
     }
-    std::cout << "  ADM reuse scratch: " << (use_adm_reuse_scratch ? "yes" : "no") << "\n\n";
+    std::cout << "\n";
     
     bool is_u2 = (input_type == "-u2" || input_type == "u2");
     bool is_u4 = (input_type == "-u4" || input_type == "u4");
@@ -377,8 +367,7 @@ int main(int argc, char** argv) {
         if (has_threads) {
             apply_thread_overrides(params, thread_list);
         }
-        return run_bench_for_type<std::uint16_t>(input, chunks_mb, params,
-                                                 use_adm_reuse_scratch, &csv);
+        return run_bench_for_type<std::uint16_t>(input, chunks_mb, params, &csv);
     } else {
         std::vector<std::uint32_t> input;
         if (!load_u32_file(input_path, input)) {
@@ -391,7 +380,6 @@ int main(int argc, char** argv) {
         if (has_threads) {
             apply_thread_overrides(params, thread_list);
         }
-        return run_bench_for_type<std::uint32_t>(input, chunks_mb, params,
-                                                 use_adm_reuse_scratch, &csv);
+        return run_bench_for_type<std::uint32_t>(input, chunks_mb, params, &csv);
     }
 }

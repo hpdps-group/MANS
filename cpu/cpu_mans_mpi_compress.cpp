@@ -598,7 +598,6 @@ int main(int argc, char** argv) {
         auto t1 = std::chrono::steady_clock::now();
         local.io_read_s = std::chrono::duration<double>(t1 - t0).count();
 
-        adm::AdmCompressScratch adm_scratch;
         double comp_s = 0.0;
         if (opts.filter == FilterId::None) {
             comp_data.resize(raw_bytes_buf.size());
@@ -641,7 +640,6 @@ int main(int argc, char** argv) {
                 mans_intermediate.resize(adm_cap);
             }
 
-            adm::AdmCompressScratch* adm_scratch_ptr = mans_intermediate.empty() ? nullptr : &adm_scratch;
             auto* intermediate_ptr = mans_intermediate.empty() ? nullptr : mans_intermediate.data();
             const std::size_t intermediate_cap = mans_intermediate.size();
 
@@ -658,8 +656,6 @@ int main(int argc, char** argv) {
                                                  out_size,
                                                  false,
                                                  "",
-                                                 adm_scratch_ptr,
-                                                 true,
                                                  intermediate_ptr,
                                                  intermediate_cap
                                                 );
@@ -672,8 +668,6 @@ int main(int argc, char** argv) {
                                                  out_size,
                                                  false,
                                                  "",
-                                                 adm_scratch_ptr,
-                                                 true,
                                                  intermediate_ptr,
                                                  intermediate_cap);
                 }

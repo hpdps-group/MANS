@@ -20,17 +20,11 @@
 
 namespace mans {
 
-void compress(const void* input_data, size_t length, const MansParams& params, uint8_t* out, size_t& out_size) {
-    compress(input_data, length, params, out, out_size, nullptr, false, nullptr, 0);
-}
-
 void compress(const void* input_data,
               size_t length,
               const MansParams& params,
               uint8_t* out,
               size_t& out_size,
-              adm::AdmCompressScratch* adm_scratch,
-              bool reuse_scratch,
               uint8_t* mans_intermediate_buf,
               size_t mans_intermediate_cap) {
     // 1. CPU branch
@@ -43,8 +37,6 @@ void compress(const void* input_data,
                                      out_size,
                                      false,
                                      "",
-                                     adm_scratch,
-                                     reuse_scratch,
                                      mans_intermediate_buf,
                                      mans_intermediate_cap);
         return;
@@ -67,17 +59,11 @@ void compress(const void* input_data,
     throw std::runtime_error("MANS::compress: Unknown backend type.");
 }
 
-void decompress(const void* input_data, size_t length, const MansParams& params, uint8_t* out, size_t& out_size) {
-    decompress(input_data, length, params, out, out_size, nullptr, false, nullptr, 0);
-}
-
 void decompress(const void* input_data,
                 size_t length,
                 const MansParams& params,
                 uint8_t* out,
                 size_t& out_size,
-                adm::AdmDecompressScratch* adm_scratch,
-                bool reuse_scratch,
                 uint8_t* mans_intermediate_buf,
                 size_t mans_intermediate_cap) {
     if (params.backend == Backend::CPU) {
@@ -89,8 +75,6 @@ void decompress(const void* input_data,
                                        out_size,
                                        false,
                                        "",
-                                       adm_scratch,
-                                       reuse_scratch,
                                        mans_intermediate_buf,
                                        mans_intermediate_cap);
         return;

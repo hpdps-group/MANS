@@ -465,7 +465,6 @@ int main(int argc, char** argv) {
 
     const std::uint64_t local_comp_bytes = all_chunk_sizes[mpi.rank];
 
-    adm::AdmDecompressScratch adm_scratch;
     std::vector<std::uint8_t> mans_intermediate;
     if (opts.filter == FilterId::Mans && rank_count > 0) {
         std::size_t adm_cap = 0;
@@ -545,7 +544,6 @@ int main(int argc, char** argv) {
             std::memcpy(raw_buf.data(), comp_buf.data(), raw_bytes);
         } else {
             std::size_t out_size = raw_bytes;
-            auto* adm_scratch_ptr = mans_intermediate.empty() ? nullptr : &adm_scratch;
             auto* intermediate_ptr = mans_intermediate.empty() ? nullptr : mans_intermediate.data();
             const std::size_t intermediate_cap = mans_intermediate.size();
             mans::decompress(comp_buf.data(),
@@ -553,8 +551,6 @@ int main(int argc, char** argv) {
                              params,
                              raw_buf.data(),
                              out_size,
-                             adm_scratch_ptr,
-                             true,
                              intermediate_ptr,
                              intermediate_cap);
             if (out_size != raw_bytes) {

@@ -98,8 +98,6 @@ void do_compress_t(
     std::size_t& final_out_size,
     bool save_adm,
     const std::string& dump_path,
-    adm::AdmCompressScratch* adm_scratch,
-    bool reuse_scratch,
     std::uint8_t* mans_intermediate_buf,
     std::size_t mans_intermediate_cap
 ) {
@@ -153,8 +151,7 @@ void do_compress_t(
 
             {
                 MANS_TIMING_SCOPE("adm_compress");
-                adm_compress<T>(data_ptr, length, mans_intermediate_buf_local, adm_size, params,
-                                adm_scratch, reuse_scratch);
+                adm_compress<T>(data_ptr, length, mans_intermediate_buf_local, adm_size, params);
             }
 
             if (adm_size > adm_cap) {
@@ -209,8 +206,6 @@ void do_decompress_t(
 
     bool save_adm,
     const std::string& dump_path,
-    adm::AdmDecompressScratch* adm_scratch,
-    bool reuse_scratch,
     std::uint8_t* mans_intermediate_buf,
     std::size_t mans_intermediate_cap
 ) {
@@ -273,7 +268,7 @@ void do_decompress_t(
             {
                 MANS_TIMING_SCOPE("adm_decompress");
                 adm_decompress<T>(mans_intermediate_buf_local, pans_decomp_len, recovered,
-                                  num_elements, params, adm_scratch, reuse_scratch);
+                                  num_elements, params);
             }
 
             final_out_size = num_elements * sizeof(T);
@@ -315,8 +310,6 @@ void compress_internal(
     std::size_t& out_size,
     bool save_adm,
     const std::string& dump_path,
-    adm::AdmCompressScratch* adm_scratch,
-    bool reuse_scratch,
     std::uint8_t* mans_intermediate_buf,
     std::size_t mans_intermediate_cap
 ) {
@@ -329,8 +322,6 @@ void compress_internal(
             out_size,
             save_adm,
             dump_path,
-            adm_scratch,
-            reuse_scratch,
             mans_intermediate_buf,
             mans_intermediate_cap
         );
@@ -343,8 +334,6 @@ void compress_internal(
             out_size,
             save_adm,
             dump_path,
-            adm_scratch,
-            reuse_scratch,
             mans_intermediate_buf,
             mans_intermediate_cap
         );
@@ -359,8 +348,6 @@ void decompress_internal(
     std::size_t& out_size,
     bool save_adm,
     const std::string& dump_path,
-    adm::AdmDecompressScratch* adm_scratch,
-    bool reuse_scratch,
     std::uint8_t* mans_intermediate_buf,
     std::size_t mans_intermediate_cap
 ) {
@@ -369,12 +356,12 @@ void decompress_internal(
     if (params.dtype == DataType::U16) {
         do_decompress_t<uint16_t>(
             ptr, length, out, out_size, params, save_adm, dump_path,
-            adm_scratch, reuse_scratch, mans_intermediate_buf, mans_intermediate_cap
+            mans_intermediate_buf, mans_intermediate_cap
         );
     } else if (params.dtype == DataType::U32) {
         do_decompress_t<uint32_t>(
             ptr, length, out, out_size, params, save_adm, dump_path,
-            adm_scratch, reuse_scratch, mans_intermediate_buf, mans_intermediate_cap
+            mans_intermediate_buf, mans_intermediate_cap
         );
     }
 }

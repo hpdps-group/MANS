@@ -30,9 +30,7 @@ void adm_compress(
     std::size_t input_len,             
     std::uint8_t* output,              
     std::size_t& output_size,
-    const mans::MansParams& params,
-    adm::AdmCompressScratch* scratch,
-    bool reuse_scratch
+    const mans::MansParams& params
     )          
 {
     std::size_t num_elements = input_len; 
@@ -68,10 +66,10 @@ void adm_compress(
 
     if constexpr (std::is_same_v<T, std::uint16_t>) {
         adm::compress_uint16(input_data, input_len, output_lengths_ptr, centers_ptr, codes_ptr,
-                             bit_signals_ptr, bit_signals_len, params, scratch, reuse_scratch);
+                             bit_signals_ptr, bit_signals_len, params);
     } else if constexpr (std::is_same_v<T, std::uint32_t>) {
         adm::compress_uint32(input_data, input_len, output_lengths_ptr, centers_ptr, codes_ptr,
-                             bit_signals_ptr, bit_signals_len, params, scratch, reuse_scratch);
+                             bit_signals_ptr, bit_signals_len, params);
     } else {
         static_assert(std::is_same_v<T, std::uint16_t> || std::is_same_v<T, std::uint32_t>,
                       "adm_compress only supports uint16_t and uint32_t");
@@ -95,9 +93,7 @@ void adm_decompress(
     std::size_t merged_size,       
     T* recovered,
     std::size_t& num_elements,
-    const mans::MansParams& params,
-    adm::AdmDecompressScratch* scratch,
-    bool reuse_scratch
+    const mans::MansParams& params
 )
 {
     if (merged_size < sizeof(adm::FileHeader)) {
@@ -147,9 +143,7 @@ void adm_decompress(
             num_elements, 
             bit_signals, 
             recovered,
-            params,
-            scratch,
-            reuse_scratch
+            params
         );
     } else if constexpr (std::is_same_v<T, std::uint32_t>) {
         adm::decompress_uint32(
@@ -160,9 +154,7 @@ void adm_decompress(
             num_elements, 
             bit_signals, 
             recovered,
-            params,
-            scratch,
-            reuse_scratch
+            params
         );
     } else {
         static_assert(std::is_same_v<T, std::uint16_t> || std::is_same_v<T, std::uint32_t>,
@@ -289,19 +281,15 @@ void adm_decompress_and_benchmark(
 // ==========================================================
 
 template void adm_compress<uint16_t>(const uint16_t*, std::size_t, std::uint8_t*, std::size_t&,
-                                     const mans::MansParams& params, adm::AdmCompressScratch*,
-                                     bool);
+                                     const mans::MansParams& params);
 template void adm_compress<uint32_t>(const uint32_t*, std::size_t, std::uint8_t*, std::size_t&,
-                                     const mans::MansParams& params, adm::AdmCompressScratch*,
-                                     bool);
+                                     const mans::MansParams& params);
 
 
 template void adm_decompress<uint16_t>(const std::uint8_t*, std::size_t, uint16_t*, std::size_t&,
-                                       const mans::MansParams& params, adm::AdmDecompressScratch*,
-                                       bool);
+                                       const mans::MansParams& params);
 template void adm_decompress<uint32_t>(const std::uint8_t*, std::size_t, uint32_t*, std::size_t&,
-                                       const mans::MansParams& params, adm::AdmDecompressScratch*,
-                                       bool);
+                                       const mans::MansParams& params);
 
 template void adm_compress_and_benchmark<uint16_t>(const uint16_t*, std::size_t, std::uint8_t*, std::size_t&,const mans::MansParams& params);
 template void adm_compress_and_benchmark<uint32_t>(const uint32_t*, std::size_t, std::uint8_t*, std::size_t&,const mans::MansParams& params);
