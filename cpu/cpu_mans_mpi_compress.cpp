@@ -419,6 +419,9 @@ static void append_metrics_csv(const std::string& csv_path,
 } // namespace
 
 int main(int argc, char** argv) {
+    MANS_TIMING_RUN_SCOPE();
+    MANS_TIMING_SCOPE("total");
+
     MpiContext mpi(argc, argv);
 
     RunOptions opts;
@@ -445,6 +448,7 @@ int main(int argc, char** argv) {
     params.backend = mans::Backend::CPU;
     params.dtype = mans::DataType::U32;
     params.adm_threshold = 4000U;
+    params.adm_decide_threads = 16;
 
     if (opts.filter == FilterId::Mans) {
         mans_cfg.emplace();
@@ -803,6 +807,10 @@ int main(int argc, char** argv) {
             : opts.metrics_csv;
         append_metrics_csv(csv_path, opts, total_elems, elem_size_final, mpi.ranks, agg);
         std::cout << "  metrics_csv:    " << csv_path << "\n";
+
+        const std::string timing_path = opts.output_bin + ".rank0.timing.csv";
+        MANS_TIMING_DUMP(timing_path);
+        std::cout << "  timing_csv:     " << timing_path << "\n";
     }
 
     return 0;

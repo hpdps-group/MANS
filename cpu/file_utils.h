@@ -3,6 +3,7 @@
 
 #include <fstream>
 #include <vector>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -44,6 +45,16 @@ inline bool save_u8_file(const std::string& filename, const std::vector<std::uin
     if (!out.is_open()) return false;
     out.write(reinterpret_cast<const char*>(data.data()),
               static_cast<std::streamsize>(data.size()));
+    return static_cast<bool>(out);
+}
+
+inline bool save_u8_file(const std::string& filename,
+                         const std::uint8_t* data,
+                         std::size_t size) {
+    std::ofstream out(filename, std::ios::binary);
+    if (!out.is_open()) return false;
+    out.write(reinterpret_cast<const char*>(data),
+              static_cast<std::streamsize>(size));
     return static_cast<bool>(out);
 }
 

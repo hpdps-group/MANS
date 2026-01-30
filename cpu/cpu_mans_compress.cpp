@@ -15,12 +15,14 @@
 #include <type_traits>
 #include <vector>
 #include <cstdlib>
+#include <cstring>
 
 #include "../mans_defs.h" 
 #include "../mans_timing.h"
 #include "adm/adm.h"
 #include "adm/adm_utils.h"
 #include "mans_cpu.h"
+#include "mans_container.h"
 #include "file_utils.h"
 
 namespace {
@@ -38,6 +40,15 @@ struct ChunkInfo {
     std::size_t offset = 0;
     std::size_t len = 0;
 };
+
+template <typename T>
+bool write_struct(std::vector<std::uint8_t>& data, std::size_t offset, const T& value) {
+    if (offset + sizeof(T) > data.size()) {
+        return false;
+    }
+    std::memcpy(data.data() + offset, &value, sizeof(T));
+    return true;
+}
 
 std::vector<ChunkInfo> build_chunks(std::size_t total_elements, std::size_t chunk_elements) {
     std::vector<ChunkInfo> chunks;
@@ -81,13 +92,14 @@ std::vector<int> parse_threads(const std::string& arg, std::string& error) {
 }
 
 void apply_thread_overrides(mans::MansParams& params, const std::vector<int>& threads) {
-    params.adm_center_calc_threads = threads[0];
-    params.adm_encode_threads = threads[1];
-    params.adm_warp_reduce_threads = threads[2];
-    params.adm_fill_tail_threads = threads[3];
-    params.adm_write_back_threads = threads[4];
-    params.adm_restore_signals_threads = threads[5];
-    params.adm_decode_values_threads = threads[6];
+    params.adm_decide_threads = threads[0];
+    params.adm_center_calc_threads = threads[1];
+    params.adm_encode_threads = threads[2];
+    params.adm_warp_reduce_threads = threads[3];
+    params.adm_fill_tail_threads = threads[4];
+    params.adm_write_back_threads = threads[5];
+    params.adm_restore_signals_threads = threads[6];
+    params.adm_decode_values_threads = threads[7];
 }
 
 template <typename T>
@@ -132,55 +144,96 @@ bool compress_chunks(const std::vector<T>& host_data,
         return false;
     }
 
-    std::size_t max_out_size = 0;
-    std::size_t max_chunk_len = 0;
-    for (const auto& chunk : chunks) {
-        std::size_t input_bytes = chunk.len * sizeof(T);
-        max_out_size += input_bytes * 2 + 4096;
-        if (chunk.len > max_chunk_len) {
-            max_chunk_len = chunk.len;
-        }
-    }
-    compressed_data.clear();
-    compressed_data.resize(max_out_size);
-    
-    std::unique_ptr<std::uint8_t, decltype(&free)> mans_intermediate_buf(nullptr, &free);
-    std::size_t mans_intermediate_cap = 0;
-    if (max_chunk_len > 0) {
-        MANS_TIMING_SCOPE("alloc_mans_intermediate_buf");
-        mans_intermediate_cap = adm_max_compressed_size<T>(max_chunk_len);
-        mans_intermediate_buf.reset(
-            static_cast<std::uint8_t*>(std::malloc(mans_intermediate_cap)));
-    }
-
     std::size_t offset = 0;
     auto start = std::chrono::high_resolution_clock::now();
 
+    std::vector<std::vector<std::uint8_t>> payloads;
+    std::vector<std::uint64_t> raw_lens;
+    payloads.reserve(chunks.size());
+    raw_lens.reserve(chunks.size());
+    std::size_t total_payload_bytes = 0;
+
     for (std::size_t i = 0; i < chunks.size(); ++i) {
         const auto& chunk = chunks[i];
-        std::size_t out_size = max_out_size - offset;
+        const std::size_t input_bytes = chunk.len * sizeof(T);
+        const std::size_t max_out_size = input_bytes * 2 + 4096;
+        std::vector<std::uint8_t> chunk_payload(max_out_size);
+        std::size_t out_size = chunk_payload.size();
         mans::cpu::compress_internal(
             host_data.data() + chunk.offset,
             chunk.len,
             params,
-            compressed_data.data() + offset,
+            chunk_payload.data(),
             out_size,
             save_adm,
-            output_file + ".adm",
-            mans_intermediate_buf.get(),
-            mans_intermediate_cap
+            output_file + ".adm"
         );
-        offset += out_size;
+        if (out_size == 0) {
+            return false;
+        }
+        chunk_payload.resize(out_size);
+        total_payload_bytes += sizeof(mans::container::ChunkHeader) + out_size;
+        payloads.emplace_back(std::move(chunk_payload));
+        raw_lens.push_back(static_cast<std::uint64_t>(input_bytes));
     }
     auto end = std::chrono::high_resolution_clock::now();
     comp_ms =
         std::chrono::duration<double, std::milli>(end - start).count();
 
-    if (offset > compressed_data.size()) {
+    mans::container::ContainerHeader header{};
+    std::memcpy(header.magic, mans::container::kContainerMagic,
+                sizeof(mans::container::kContainerMagic));
+    header.version = mans::container::kContainerVersion;
+    header.dtype = (params.dtype == mans::DataType::U16) ? 1 : 2;
+    header.reserved0 = 0;
+    header.header_bytes = static_cast<std::uint16_t>(sizeof(mans::container::ContainerHeader));
+    header.chunk_count = static_cast<std::uint64_t>(chunks.size());
+    header.index_offset = sizeof(mans::container::ContainerHeader);
+    header.data_offset = header.index_offset +
+                         header.chunk_count * sizeof(mans::container::IndexEntry);
+    header.chunk_header_bytes = sizeof(mans::container::ChunkHeader);
+    header.flags = 0;
+
+    const std::size_t total_size = static_cast<std::size_t>(header.data_offset) + total_payload_bytes;
+    compressed_data.clear();
+    compressed_data.resize(total_size);
+
+    if (!write_struct(compressed_data, 0, header)) {
         return false;
     }
-    compressed_data.resize(offset);
-    return true;
+    for (std::size_t i = 0; i < payloads.size(); ++i) {
+        mans::container::IndexEntry entry{};
+        entry.offset = static_cast<std::uint64_t>(header.data_offset + offset);
+        entry.comp_len = static_cast<std::uint64_t>(payloads[i].size());
+        entry.raw_len = raw_lens[i];
+        const std::size_t index_offset =
+            static_cast<std::size_t>(header.index_offset + i * sizeof(mans::container::IndexEntry));
+        if (!write_struct(compressed_data, index_offset, entry)) {
+            return false;
+        }
+        mans::container::ChunkHeader chunk_header{};
+        std::memcpy(chunk_header.magic, mans::container::kChunkMagic,
+                    sizeof(mans::container::kChunkMagic));
+        chunk_header.version = mans::container::kChunkVersion;
+        chunk_header.header_bytes = static_cast<std::uint16_t>(sizeof(mans::container::ChunkHeader));
+        chunk_header.comp_len = entry.comp_len;
+        chunk_header.raw_len = entry.raw_len;
+        chunk_header.chunk_index = static_cast<std::uint64_t>(i);
+        if (!write_struct(compressed_data, static_cast<std::size_t>(entry.offset), chunk_header)) {
+            return false;
+        }
+        const std::size_t payload_offset =
+            static_cast<std::size_t>(entry.offset + sizeof(mans::container::ChunkHeader));
+        if (payload_offset + payloads[i].size() > compressed_data.size()) {
+            return false;
+        }
+        std::memcpy(compressed_data.data() + payload_offset,
+                    payloads[i].data(),
+                    payloads[i].size());
+        offset += sizeof(mans::container::ChunkHeader) + payloads[i].size();
+    }
+
+    return offset == total_payload_bytes;
 }
 
 } // namespace
@@ -191,7 +244,7 @@ int main(int argc, char** argv) {
         std::cerr << kAnsiRed << "Use: " << kAnsiReset << argv[0] 
                   << " <u2|u4> <input_file> <output_bin_file> <save_adm(0|1)>"
                   << " [--threshold 4000] [--chunk-mb 0.0]"
-                  << " [--threads 32,32,32,32,32,32,32]"
+                  << " [--threads 16,32,32,32,32,32,32,32]"
                   << " [--csv out.csv]\n";
         return 1;
     }
@@ -227,6 +280,7 @@ int main(int argc, char** argv) {
     mans::MansParams params{};
     params.backend = mans::Backend::CPU;
     params.adm_threshold = threshold;
+    params.adm_decide_threads = 16;
     params.adm_center_calc_threads = 32;
     params.adm_encode_threads = 32;
     params.adm_warp_reduce_threads = 32;
@@ -251,8 +305,8 @@ int main(int argc, char** argv) {
             std::cerr << error << "\n";
             return 1;
         }
-        if (thread_list.size() != 7) {
-            std::cerr << "--threads expects 7 values: center,encode,warp_reduce,"
+        if (thread_list.size() != 8) {
+            std::cerr << "--threads expects 8 values: decide,center,encode,warp_reduce,"
                       << "fill_tail,write_back,restore_signals,decode_values\n";
             return 1;
         }
@@ -291,7 +345,7 @@ int main(int argc, char** argv) {
                "throughput_mbps,io_ratio\n";
     }
 
-    constexpr int kIters = 2;
+    constexpr int kIters = 11;
     double total_comp_ms = 0.0;
     double total_io_read_ms = 0.0;
     double total_io_write_ms = 0.0;

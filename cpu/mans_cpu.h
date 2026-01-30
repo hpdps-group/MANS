@@ -13,9 +13,7 @@ void compress_internal(
     std::uint8_t* out,
     std::size_t& out_size,
     bool save_adm,
-    const std::string& dump_path,
-    std::uint8_t* mans_intermediate_buf = nullptr,
-    std::size_t mans_intermediate_cap = 0
+    const std::string& dump_path
 );
 
 
@@ -26,9 +24,7 @@ void decompress_internal(
     std::uint8_t* out,
     std::size_t& out_size,
     bool save_adm,
-    const std::string& dump_path,
-    std::uint8_t* mans_intermediate_buf = nullptr,
-    std::size_t mans_intermediate_cap = 0
+    const std::string& dump_path
 );
 
 }

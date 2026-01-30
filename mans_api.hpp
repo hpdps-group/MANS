@@ -13,9 +13,7 @@ void compress(
     size_t length,
     const MansParams& params,
     uint8_t* out,
-    size_t& out_size,
-    uint8_t* mans_intermediate_buf = nullptr,
-    size_t mans_intermediate_cap = 0
+    size_t& out_size
 );
 
 
@@ -24,9 +22,7 @@ void decompress(
     size_t length,
     const MansParams& params,
     uint8_t* out,
-    size_t& out_size,
-    uint8_t* mans_intermediate_buf = nullptr,
-    size_t mans_intermediate_cap = 0
+    size_t& out_size
 );
 
 std::size_t get_mans_max_compress_bytes_p(

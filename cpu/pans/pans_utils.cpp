@@ -302,9 +302,15 @@ void pans_decompress(
     uint32_t* symbol = nullptr;
     uint32_t* pdf = nullptr;
     uint32_t* cdf = nullptr;
+    bool owns_dec_buffer = false;
     {
         MANS_TIMING_SCOPE("alloc_pans_decompress");
-        decPtrs = (uint8_t*)malloc(sizeof(uint8_t) * batchSize);
+        if (decompressedData) {
+            decPtrs = decompressedData;
+        } else {
+            decPtrs = (uint8_t*)malloc(sizeof(uint8_t) * batchSize);
+            owns_dec_buffer = true;
+        }
         symbol = (uint32_t*)std::aligned_alloc(
             kBlockAlignment,
             sizeof(uint32_t) * (1u << precision));
@@ -327,15 +333,11 @@ void pans_decompress(
     auto end = std::chrono::high_resolution_clock::now();  
     duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1e3;
 
-    if (decompressedData) {
-        std::memcpy(decompressedData, decPtrs, batchSize * sizeof(uint8_t));
-    }
-    
-
     decompressedLen = batchSize;
 
-
-    free(decPtrs);
+    if (owns_dec_buffer) {
+        free(decPtrs);
+    }
     free(symbol);
     free(pdf);
     free(cdf);

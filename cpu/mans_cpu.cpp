@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <new>
 #include <memory>
+#include <cstdlib>
+#include <omp.h>
 
 #include "adm/adm_utils.h"
 #include "pans/pans_utils.h"
@@ -21,11 +23,15 @@ namespace cpu {
 // ==========================================
 
 template<typename T>
-static bool decide_use_adm(const T* data, size_t size, uint32_t threshold) {
+static bool decide_use_adm(const T* data, size_t size, uint32_t threshold, uint32_t threads) {
     const std::size_t block_size = 512;
     std::uint64_t max_block_diff = 0;
+    const std::size_t blocks = (size + block_size - 1) / block_size;
+    const int num_threads = threads == 0 ? 16 : static_cast<int>(threads);
 
-    for (std::size_t i = 0; i < size; i += block_size) {
+    #pragma omp parallel for num_threads(num_threads) reduction(max:max_block_diff)
+    for (std::size_t b = 0; b < blocks; ++b) {
+        std::size_t i = b * block_size;
         std::size_t end = std::min(i + block_size, size);
         T bmin = std::numeric_limits<T>::max();
         T bmax = std::numeric_limits<T>::min();
@@ -40,7 +46,6 @@ static bool decide_use_adm(const T* data, size_t size, uint32_t threshold) {
         if (diff > max_block_diff) {
             max_block_diff = diff;
         }
-        if (max_block_diff > threshold) return false;
     }
     return (max_block_diff <= threshold);
 }
@@ -97,9 +102,7 @@ void do_compress_t(
     std::uint8_t* final_out,
     std::size_t& final_out_size,
     bool save_adm,
-    const std::string& dump_path,
-    std::uint8_t* mans_intermediate_buf,
-    std::size_t mans_intermediate_cap
+    const std::string& dump_path
 ) {
     uint32_t threshold = params.adm_threshold;
     if (threshold == 0) threshold = 4000;
@@ -107,7 +110,7 @@ void do_compress_t(
     bool use_adm = false;
     {
         MANS_TIMING_SCOPE("decide_adm");
-        use_adm = decide_use_adm(data_ptr, length, threshold);
+        use_adm = decide_use_adm(data_ptr, length, threshold, params.adm_decide_threads);
     }
     std::uint8_t codec_code = 0;
 
@@ -122,7 +125,7 @@ void do_compress_t(
 
 
     std::uint8_t* mans_intermediate_buf_local = nullptr;
-    std::unique_ptr<std::uint8_t[]> mans_intermediate_owned;
+    std::unique_ptr<std::uint8_t, decltype(&free)> mans_intermediate_owned(nullptr, &free);
     std::size_t adm_cap = 0;
 
     // simple conservative bounds
@@ -133,19 +136,16 @@ void do_compress_t(
         if (use_adm) {
             codec_code = 1; // ADM
             adm_cap = adm_max_compressed_size<T>(length);
-            if (mans_intermediate_buf) {
-                if (mans_intermediate_cap < adm_cap) {
-                    std::cerr << "[Error] mans_intermediate_buf too small: mans_intermediate_cap < adm_cap.\n";
-                    return;
-                }
-                mans_intermediate_buf_local = mans_intermediate_buf;
-            } else {
-                {
-                    MANS_TIMING_SCOPE("alloc_adm_buf");
-                    mans_intermediate_owned = std::make_unique<std::uint8_t[]>(adm_cap);
-                }
-                mans_intermediate_buf_local = mans_intermediate_owned.get();
+            {
+                MANS_TIMING_SCOPE("alloc_adm_buf");
+                mans_intermediate_owned.reset(
+                    static_cast<std::uint8_t*>(std::malloc(adm_cap)));
             }
+            if (!mans_intermediate_owned) {
+                std::cerr << "[Error] Out of memory during alloc_adm_buf.\n";
+                return;
+            }
+            mans_intermediate_buf_local = mans_intermediate_owned.get();
 
             std::size_t adm_size = 0;
 
@@ -205,9 +205,7 @@ void do_decompress_t(
     const MansParams& params,
 
     bool save_adm,
-    const std::string& dump_path,
-    std::uint8_t* mans_intermediate_buf,
-    std::size_t mans_intermediate_cap
+    const std::string& dump_path
 ) {
     final_out_size = 0;
 
@@ -221,24 +219,22 @@ void do_decompress_t(
     size_t payload_len = length - 1;
 
     std::uint8_t* mans_intermediate_buf_local = nullptr;
-    std::unique_ptr<std::uint8_t[]> mans_intermediate_owned;
+    std::unique_ptr<std::uint8_t, decltype(&free)> mans_intermediate_owned(nullptr, &free);
 
     try {
         std::size_t pans_decomp_len = 0;
         get_compress_and_decompressed_len(payload_ptr,payload_len,pans_decomp_len);
-        if (mans_intermediate_buf) {
-            if (mans_intermediate_cap < pans_decomp_len) {
-                std::cerr << "[Error] mans_intermediate_buf too small: mans_intermediate_cap < pans_decomp_len.\n";
-                return;
-            }
-            mans_intermediate_buf_local = mans_intermediate_buf;
-        } else {
-            {
-                MANS_TIMING_SCOPE("alloc_pans_decomp_buf");
-                mans_intermediate_owned = std::make_unique<std::uint8_t[]>(pans_decomp_len);
-            }
-            mans_intermediate_buf_local = mans_intermediate_owned.get();
+        {
+            MANS_TIMING_SCOPE("alloc_pans_decomp_buf");
+            mans_intermediate_owned.reset(
+                static_cast<std::uint8_t*>(std::malloc(pans_decomp_len)));
         }
+        if (!mans_intermediate_owned) {
+            std::cerr << "[Error] Out of memory.\n";
+            final_out_size = 0;
+            return;
+        }
+        mans_intermediate_buf_local = mans_intermediate_owned.get();
         double pans_dur = 0.0;
 
         {
@@ -309,9 +305,7 @@ void compress_internal(
     std::uint8_t* out,
     std::size_t& out_size,
     bool save_adm,
-    const std::string& dump_path,
-    std::uint8_t* mans_intermediate_buf,
-    std::size_t mans_intermediate_cap
+    const std::string& dump_path
 ) {
     if (params.dtype == DataType::U16) {
         do_compress_t(
@@ -321,9 +315,7 @@ void compress_internal(
             out,
             out_size,
             save_adm,
-            dump_path,
-            mans_intermediate_buf,
-            mans_intermediate_cap
+            dump_path
         );
     } else if (params.dtype == DataType::U32) {
         do_compress_t(
@@ -333,9 +325,7 @@ void compress_internal(
             out,
             out_size,
             save_adm,
-            dump_path,
-            mans_intermediate_buf,
-            mans_intermediate_cap
+            dump_path
         );
     }
 }
@@ -347,21 +337,17 @@ void decompress_internal(
     std::uint8_t* out,
     std::size_t& out_size,
     bool save_adm,
-    const std::string& dump_path,
-    std::uint8_t* mans_intermediate_buf,
-    std::size_t mans_intermediate_cap
+    const std::string& dump_path
 ) {
     const uint8_t* ptr = static_cast<const uint8_t*>(input_data);
 
     if (params.dtype == DataType::U16) {
         do_decompress_t<uint16_t>(
-            ptr, length, out, out_size, params, save_adm, dump_path,
-            mans_intermediate_buf, mans_intermediate_cap
+            ptr, length, out, out_size, params, save_adm, dump_path
         );
     } else if (params.dtype == DataType::U32) {
         do_decompress_t<uint32_t>(
-            ptr, length, out, out_size, params, save_adm, dump_path,
-            mans_intermediate_buf, mans_intermediate_cap
+            ptr, length, out, out_size, params, save_adm, dump_path
         );
     }
 }

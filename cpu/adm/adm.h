@@ -210,8 +210,10 @@ inline void decompress_uint16(
     // Step 1: Restore signal[]
     std::unique_ptr<uint8_t, decltype(&free)> signals_local(nullptr, &free);
 
-    MANS_TIMING_SCOPE("adm_alloc_scratch");
-    signals_local.reset(static_cast<uint8_t*>(std::malloc(num_elements)));
+    {
+        MANS_TIMING_SCOPE("adm_alloc_scratch");
+        signals_local.reset(static_cast<uint8_t*>(std::malloc(num_elements)));
+    }
     if (!signals_local) {
         std::cerr << "Failed to allocate ADM scratch buffer.\n";
         return;

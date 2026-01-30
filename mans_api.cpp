@@ -24,9 +24,7 @@ void compress(const void* input_data,
               size_t length,
               const MansParams& params,
               uint8_t* out,
-              size_t& out_size,
-              uint8_t* mans_intermediate_buf,
-              size_t mans_intermediate_cap) {
+              size_t& out_size) {
     // 1. CPU branch
     if (params.backend == Backend::CPU) {
 #ifdef MANS_ENABLE_CPU
@@ -36,9 +34,7 @@ void compress(const void* input_data,
                                      out,
                                      out_size,
                                      false,
-                                     "",
-                                     mans_intermediate_buf,
-                                     mans_intermediate_cap);
+                                     "");
         return;
 #else
         throw std::runtime_error("MANS::compress: CPU backend was NOT compiled.");
@@ -63,9 +59,7 @@ void decompress(const void* input_data,
                 size_t length,
                 const MansParams& params,
                 uint8_t* out,
-                size_t& out_size,
-                uint8_t* mans_intermediate_buf,
-                size_t mans_intermediate_cap) {
+                size_t& out_size) {
     if (params.backend == Backend::CPU) {
 #ifdef MANS_ENABLE_CPU
         mans::cpu::decompress_internal(input_data,
@@ -74,9 +68,7 @@ void decompress(const void* input_data,
                                        out,
                                        out_size,
                                        false,
-                                       "",
-                                       mans_intermediate_buf,
-                                       mans_intermediate_cap);
+                                       "");
         return;
 #else
         throw std::runtime_error("MANS::decompress: CPU backend was NOT compiled.");
