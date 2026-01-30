@@ -12,6 +12,7 @@ constexpr char kContainerMagic[8] = {'M', 'A', 'N', 'S', 'C', 'H', 'N', 'K'};
 constexpr char kChunkMagic[4] = {'M', 'C', 'H', 'K'};
 constexpr std::uint32_t kContainerVersion = 1;
 constexpr std::uint16_t kChunkVersion = 1;
+constexpr std::uint64_t kFlagRawPayload = 1ull << 0;
 
 #pragma pack(push, 1)
 struct ContainerHeader {

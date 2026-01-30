@@ -135,6 +135,11 @@ public:
         return sum_prefix(*stats, prefix).total_ms;
     }
 
+    void reset() {
+        runs_.clear();
+        current_ = nullptr;
+    }
+
 private:
     struct RunData {
         std::unordered_map<std::string, TimingStats> stats;
@@ -219,11 +224,13 @@ public:
 #define MANS_TIMING_SCOPE(name) mans::ScopedTimer _mans_timer_##__LINE__(name)
 #define MANS_TIMING_DUMP(path) mans::TimingCollector::instance().dump_csv(path)
 #define MANS_TIMING_RUN_SCOPE() mans::RunScope _mans_run_##__LINE__{}
+#define MANS_TIMING_RESET() mans::TimingCollector::instance().reset()
 
 #else
 
 #define MANS_TIMING_SCOPE(name) do {} while (0)
 #define MANS_TIMING_DUMP(path) do {} while (0)
 #define MANS_TIMING_RUN_SCOPE() do {} while (0)
+#define MANS_TIMING_RESET() do {} while (0)
 
 #endif

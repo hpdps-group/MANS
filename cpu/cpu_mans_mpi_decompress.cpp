@@ -26,12 +26,20 @@
 #include "../mans_defs.h"
 #include "../mans_timing.h"
 #include "adm/adm_utils.h"
+#include "mans_container.h"
 #include "../tools/H5Z-MANS/include/H5Z-MANS_config.h"
 
 namespace {
 
-constexpr char kMagic[8] = {'M','A','N','S','M','P','I','1'};
-constexpr std::uint32_t kVersion = 2;
+constexpr const char* kAnsiReset = "\033[0m";
+constexpr const char* kAnsiBold = "\033[1m";
+constexpr const char* kAnsiDim = "\033[2m";
+constexpr const char* kAnsiRed = "\033[31m";
+constexpr const char* kAnsiGreen = "\033[32m";
+constexpr const char* kAnsiYellow = "\033[33m";
+constexpr const char* kAnsiBlue = "\033[34m";
+constexpr const char* kAnsiCyan = "\033[36m";
+
 
 enum class FilterId : std::uint32_t {
     None = 0,
@@ -58,19 +66,6 @@ struct Metrics {
     std::uint64_t comp_bytes = 0;
 };
 
-struct MansMpiHeader {
-    char magic[8];
-    std::uint32_t version = 0;
-    std::uint32_t filter = 0;
-    std::uint32_t dtype = 0;
-    std::uint32_t elem_size = 0;
-    std::uint64_t total_elems = 0;
-    std::uint32_t ranks = 0;
-    std::uint32_t reserved = 0;
-    std::uint64_t total_comp_bytes = 0;
-};
-
-static_assert(sizeof(MansMpiHeader) == 48, "Unexpected header size");
 
 struct MpiContext {
     int rank = 0;
@@ -369,8 +364,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    MansMpiHeader header{};
-    std::vector<std::uint64_t> all_chunk_sizes;
+    mans::container::ContainerHeader header{};
+    std::vector<mans::container::IndexEntry> index_entries;
     if (mpi.rank == 0) {
         int fd = open(opts.input_bin.c_str(), O_RDONLY);
         if (fd < 0) {
@@ -378,44 +373,50 @@ int main(int argc, char** argv) {
             return 1;
         }
         read_fully(fd, &header, sizeof(header), 0);
-        if (std::memcmp(header.magic, kMagic, sizeof(header.magic)) != 0 ||
-            header.version != kVersion) {
-            std::cerr << "[Error] Invalid input header (magic/version mismatch)\n";
+        if (!mans::container::magic_matches(
+                header.magic, mans::container::kContainerMagic,
+                sizeof(mans::container::kContainerMagic)) ||
+            header.version != mans::container::kContainerVersion ||
+            header.header_bytes != sizeof(mans::container::ContainerHeader)) {
+            std::cerr << "[Error] Invalid container header (magic/version mismatch)\n";
             close(fd);
             return 1;
         }
-        all_chunk_sizes.resize(header.ranks);
-        read_fully(fd,
-                   all_chunk_sizes.data(),
-                   static_cast<std::size_t>(header.ranks) * sizeof(std::uint64_t),
-                   sizeof(header));
+        if (header.chunk_header_bytes != sizeof(mans::container::ChunkHeader)) {
+            std::cerr << "[Error] Chunk header size mismatch\n";
+            close(fd);
+            return 1;
+        }
+        index_entries.resize(static_cast<std::size_t>(header.chunk_count));
+        if (header.chunk_count > 0) {
+            read_fully(fd,
+                       index_entries.data(),
+                       index_entries.size() * sizeof(mans::container::IndexEntry),
+                       static_cast<std::uint64_t>(header.index_offset));
+        }
         close(fd);
     }
 
     MPI_Bcast(&header, sizeof(header), MPI_BYTE, 0, MPI_COMM_WORLD);
-
     if (mpi.rank != 0) {
-        all_chunk_sizes.resize(header.ranks);
+        index_entries.resize(static_cast<std::size_t>(header.chunk_count));
     }
-    MPI_Bcast(all_chunk_sizes.data(),
-              static_cast<int>(header.ranks),
-              MPI_UINT64_T,
-              0,
-              MPI_COMM_WORLD);
+    if (!index_entries.empty()) {
+        MPI_Bcast(index_entries.data(),
+                  static_cast<int>(index_entries.size() * sizeof(mans::container::IndexEntry)),
+                  MPI_BYTE,
+                  0,
+                  MPI_COMM_WORLD);
+    }
 
-    if (header.ranks != static_cast<std::uint32_t>(mpi.ranks)) {
-        if (mpi.rank == 0) {
-            std::cerr << "[Error] MPI ranks (" << mpi.ranks
-                      << ") do not match header ranks (" << header.ranks << ").\n";
-        }
-        return 1;
-    }
     if (opts.expected_ranks > 0 && opts.expected_ranks != mpi.ranks && mpi.rank == 0) {
         std::cerr << "[WARN] --ranks " << opts.expected_ranks
                   << " does not match MPI world size " << mpi.ranks << ".\n";
     }
 
-    const auto header_filter = static_cast<FilterId>(header.filter);
+    const bool raw_payload =
+        (header.flags & mans::container::kFlagRawPayload) != 0;
+    const auto header_filter = raw_payload ? FilterId::None : FilterId::Mans;
     if (!opts.filter_seen) {
         opts.filter = header_filter;
     } else if (opts.filter != header_filter) {
@@ -430,7 +431,7 @@ int main(int argc, char** argv) {
 
     if (opts.filter == FilterId::Mans && opts.mans_config_file.empty()) {
         if (mpi.rank == 0) {
-            std::cerr << "[Error] --mans-config is required when header filter is mans\n";
+            std::cerr << "[Error] --mans-config is required when filter is mans\n";
         }
         return 1;
     }
@@ -455,39 +456,45 @@ int main(int argc, char** argv) {
         params.backend = mans::Backend::CPU;
     }
 
-    params.dtype = header.dtype;
-    const std::size_t elem_size = header.elem_size;
-    const std::size_t total_elems = static_cast<std::size_t>(header.total_elems);
+    if (header.dtype != 1 && header.dtype != 2) {
+        if (mpi.rank == 0) {
+            std::cerr << "[Error] Unsupported dtype value in container header: "
+                      << static_cast<int>(header.dtype) << "\n";
+        }
+        return 1;
+    }
+    params.dtype = (header.dtype == 1) ? mans::DataType::U16 : mans::DataType::U32;
+    const std::size_t elem_size = (params.dtype == mans::DataType::U16) ? 2 : 4;
+    std::uint64_t total_raw_bytes = 0;
+    for (const auto& entry : index_entries) {
+        total_raw_bytes += entry.raw_len;
+    }
+    if (total_raw_bytes % elem_size != 0) {
+        if (mpi.rank == 0) {
+            std::cerr << "[Error] Total raw bytes not divisible by elem size.\n";
+        }
+        return 1;
+    }
+    const std::size_t total_elems = static_cast<std::size_t>(total_raw_bytes / elem_size);
 
     std::size_t rank_offset = 0;
     std::size_t rank_count = 0;
     split_even(total_elems, mpi.rank, mpi.ranks, rank_offset, rank_count);
 
-    const std::uint64_t local_comp_bytes = all_chunk_sizes[mpi.rank];
-
-    std::vector<std::uint8_t> mans_intermediate;
-    if (opts.filter == FilterId::Mans && rank_count > 0) {
-        std::size_t adm_cap = 0;
-        if (params.dtype == mans::DataType::U16) {
-            adm_cap = adm_max_compressed_size<std::uint16_t>(rank_count);
-        } else {
-            adm_cap = adm_max_compressed_size<std::uint32_t>(rank_count);
-        }
-        const std::size_t raw_bytes = rank_count * elem_size;
-        const std::size_t cap = std::max(adm_cap, raw_bytes);
-        mans_intermediate.resize(cap);
-    }
-
-    std::uint64_t prefix_bytes = 0;
-    MPI_Exscan(&local_comp_bytes, &prefix_bytes, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
     if (mpi.rank == 0) {
-        prefix_bytes = 0;
+        const std::string dtype_str = (params.dtype == mans::DataType::U16) ? "u2" : "u4";
+        std::cout << kAnsiBold << "Command-line arguments:" << kAnsiReset << "\n";
+        std::cout << "  " << kAnsiCyan << "Input type" << kAnsiReset << ": " << dtype_str << "\n";
+        std::cout << "  " << kAnsiCyan << "Input file" << kAnsiReset << ": " << opts.input_bin << "\n";
+        std::cout << "  " << kAnsiCyan << "Output file" << kAnsiReset << ": " << opts.output_bin << "\n";
+        std::cout << "  " << kAnsiCyan << "Filter" << kAnsiReset << ": "
+                  << (opts.filter == FilterId::Mans ? "mans" : "none") << "\n";
+        std::cout << "  " << kAnsiCyan << "MPI ranks" << kAnsiReset << ": " << mpi.ranks << "\n";
+        if (!opts.metrics_csv.empty()) {
+            std::cout << "  " << kAnsiCyan << "CSV output" << kAnsiReset << ": " << opts.metrics_csv << "\n";
+        }
+        std::cout << "\n";
     }
-
-    std::uint64_t total_comp_bytes = 0;
-    MPI_Reduce(&local_comp_bytes, &total_comp_bytes, 1, MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
-
-    const std::uint64_t header_bytes = sizeof(MansMpiHeader) + static_cast<std::uint64_t>(header.ranks) * sizeof(std::uint64_t);
 
     if (mpi.rank == 0) {
         int fd = open(opts.output_bin.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0644);
@@ -495,7 +502,6 @@ int main(int argc, char** argv) {
             std::cerr << "[Error] Failed to create output_bin: " << opts.output_bin << "\n";
             return 1;
         }
-        const std::uint64_t total_raw_bytes = static_cast<std::uint64_t>(total_elems) * elem_size;
         if (ftruncate(fd, static_cast<off_t>(total_raw_bytes)) != 0) {
             std::cerr << "[WARN] Failed to ftruncate output file.\n";
         }
@@ -506,9 +512,9 @@ int main(int argc, char** argv) {
 
     Metrics local{};
     local.raw_bytes = static_cast<std::uint64_t>(rank_count) * elem_size;
-    local.comp_bytes = local_comp_bytes;
+    local.comp_bytes = 0;
 
-    if (rank_count > 0 && local_comp_bytes > 0) {
+    if (rank_count > 0 && total_raw_bytes > 0) {
         int in_fd = open(opts.input_bin.c_str(), O_RDONLY);
         int out_fd = open(opts.output_bin.c_str(), O_WRONLY);
         if (in_fd < 0 || out_fd < 0) {
@@ -524,41 +530,80 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        std::vector<std::uint8_t> comp_buf;
-        comp_buf.resize(local_comp_bytes);
-
-        auto t0 = std::chrono::steady_clock::now();
-        read_fully(in_fd, comp_buf.data(), comp_buf.size(), header_bytes + prefix_bytes);
-        auto t1 = std::chrono::steady_clock::now();
-        local.io_read_s += std::chrono::duration<double>(t1 - t0).count();
-
         const std::size_t raw_bytes = rank_count * elem_size;
-        std::vector<std::uint8_t> raw_buf;
-        raw_buf.resize(raw_bytes);
+        std::vector<std::uint8_t> raw_buf(raw_bytes, 0);
+        const std::uint64_t rank_start = static_cast<std::uint64_t>(rank_offset) * elem_size;
+        const std::uint64_t rank_end = rank_start + raw_bytes;
 
-        auto t2 = std::chrono::steady_clock::now();
-        if (opts.filter == FilterId::None) {
-            if (comp_buf.size() != raw_bytes) {
-                throw std::runtime_error("Compressed size mismatch for filter=none");
+        std::uint64_t chunk_raw_start = 0;
+        for (std::size_t i = 0; i < index_entries.size(); ++i) {
+            const auto& entry = index_entries[i];
+            const std::uint64_t chunk_raw_end = chunk_raw_start + entry.raw_len;
+            if (chunk_raw_end <= rank_start || chunk_raw_start >= rank_end) {
+                chunk_raw_start = chunk_raw_end;
+                continue;
             }
-            std::memcpy(raw_buf.data(), comp_buf.data(), raw_bytes);
-        } else {
-            std::size_t out_size = raw_bytes;
-            auto* intermediate_ptr = mans_intermediate.empty() ? nullptr : mans_intermediate.data();
-            const std::size_t intermediate_cap = mans_intermediate.size();
-            mans::decompress(comp_buf.data(),
-                             comp_buf.size(),
-                             params,
-                             raw_buf.data(),
-                             out_size,
-                             intermediate_ptr,
-                             intermediate_cap);
-            if (out_size != raw_bytes) {
-                raw_buf.resize(out_size);
+
+            mans::container::ChunkHeader chunk_header{};
+            read_fully(in_fd, &chunk_header, sizeof(chunk_header), entry.offset);
+            if (!mans::container::magic_matches(
+                    chunk_header.magic, mans::container::kChunkMagic,
+                    sizeof(mans::container::kChunkMagic)) ||
+                chunk_header.version != mans::container::kChunkVersion ||
+                chunk_header.header_bytes != sizeof(mans::container::ChunkHeader) ||
+                chunk_header.comp_len != entry.comp_len ||
+                chunk_header.raw_len != entry.raw_len) {
+                throw std::runtime_error("Invalid chunk header");
             }
+
+            const std::uint64_t payload_offset =
+                entry.offset + sizeof(mans::container::ChunkHeader);
+
+            const std::uint64_t copy_start = std::max(chunk_raw_start, rank_start);
+            const std::uint64_t copy_end = std::min(chunk_raw_end, rank_end);
+            const std::size_t copy_len = static_cast<std::size_t>(copy_end - copy_start);
+            const std::size_t chunk_offset = static_cast<std::size_t>(copy_start - chunk_raw_start);
+            const std::size_t rank_offset_bytes = static_cast<std::size_t>(copy_start - rank_start);
+
+            if (chunk_raw_start >= rank_start && chunk_raw_start < rank_end) {
+                local.comp_bytes += entry.comp_len;
+            }
+
+            if (raw_payload) {
+                auto t0 = std::chrono::steady_clock::now();
+                read_fully(in_fd,
+                           raw_buf.data() + rank_offset_bytes,
+                           copy_len,
+                           payload_offset + chunk_offset);
+                auto t1 = std::chrono::steady_clock::now();
+                local.io_read_s += std::chrono::duration<double>(t1 - t0).count();
+            } else {
+                std::vector<std::uint8_t> comp_buf(static_cast<std::size_t>(entry.comp_len));
+                auto t0 = std::chrono::steady_clock::now();
+                read_fully(in_fd, comp_buf.data(), comp_buf.size(), payload_offset);
+                auto t1 = std::chrono::steady_clock::now();
+                local.io_read_s += std::chrono::duration<double>(t1 - t0).count();
+
+                std::vector<std::uint8_t> chunk_raw(static_cast<std::size_t>(entry.raw_len));
+                std::size_t out_size = chunk_raw.size();
+                auto t2 = std::chrono::steady_clock::now();
+                mans::decompress(comp_buf.data(),
+                                 comp_buf.size(),
+                                 params,
+                                 chunk_raw.data(),
+                                 out_size);
+                auto t3 = std::chrono::steady_clock::now();
+                local.comp_s += std::chrono::duration<double>(t3 - t2).count();
+                if (out_size != entry.raw_len) {
+                    throw std::runtime_error("Decompressed size mismatch");
+                }
+                std::memcpy(raw_buf.data() + rank_offset_bytes,
+                            chunk_raw.data() + chunk_offset,
+                            copy_len);
+            }
+
+            chunk_raw_start = chunk_raw_end;
         }
-        auto t3 = std::chrono::steady_clock::now();
-        local.comp_s += std::chrono::duration<double>(t3 - t2).count();
 
         auto t4 = std::chrono::steady_clock::now();
         write_fully(out_fd,
@@ -598,11 +643,30 @@ int main(int argc, char** argv) {
         const double write_thr = agg.io_write_s > 0.0 ? raw_mb / agg.io_write_s : 0.0;
         const double ratio = agg.raw_bytes > 0 ? static_cast<double>(agg.comp_bytes) / agg.raw_bytes : 0.0;
 
-        std::cout << "\n[Summary]\n";
-        std::cout << "  comp_read_s:    " << agg.io_read_s << " (" << read_thr << " MB/s)\n";
-        std::cout << "  decompress_s:   " << agg.comp_s << " (" << comp_thr << " MB/s)\n";
-        std::cout << "  raw_write_s:    " << agg.io_write_s << " (" << write_thr << " MB/s)\n";
-        std::cout << "  ratio:          " << ratio << " (comp/raw)\n";
+        const std::string dtype_str = (params.dtype == mans::DataType::U16) ? "u2" : "u4";
+        std::cout << kAnsiBold << "Mans mpi decompress finished!" << kAnsiReset
+                  << " Output: " << opts.output_bin << "\n";
+        std::cout << kAnsiDim << "Config: " << kAnsiReset
+                  << "dtype=" << dtype_str
+                  << ", format=container"
+                  << ", filter=" << (opts.filter == FilterId::Mans ? "mans" : "none")
+                  << ", chunk_count=" << header.chunk_count
+                  << ", ranks=" << mpi.ranks
+                  << "\n";
+        std::cout << kAnsiBlue << "IO read s" << kAnsiReset << ": "
+                  << agg.io_read_s << " (" << read_thr << " MB/s), "
+                  << kAnsiBlue << "Decompress s" << kAnsiReset << ": "
+                  << agg.comp_s << " (" << comp_thr << " MB/s), "
+                  << kAnsiBlue << "IO write s" << kAnsiReset << ": "
+                  << agg.io_write_s << " (" << write_thr << " MB/s)\n";
+        std::cout << kAnsiGreen << "Throughput (MB/s, decomp only)" << kAnsiReset << ": "
+                  << comp_thr
+                  << ", " << kAnsiYellow << "IO ratio" << kAnsiReset << ": "
+                  << (agg.io_read_s + agg.io_write_s + agg.comp_s > 0.0
+                          ? (agg.io_read_s + agg.io_write_s) /
+                                (agg.io_read_s + agg.io_write_s + agg.comp_s)
+                          : 0.0)
+                  << ", ratio=" << ratio << "\n";
 
         const std::string csv_path = opts.metrics_csv.empty()
             ? (opts.input_bin + ".mpi_metrics.csv")
@@ -611,6 +675,5 @@ int main(int argc, char** argv) {
         std::cout << "  metrics_csv:    " << csv_path << "\n";
     }
 
-    (void)total_comp_bytes;
     return 0;
 }

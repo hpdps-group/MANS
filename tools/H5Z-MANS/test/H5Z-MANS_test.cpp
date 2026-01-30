@@ -249,12 +249,38 @@ public:
             setup_totals();
             print_banner();
 
-            Metrics local;
-            if (options_.mode == Mode::Compress) {
-                local = compress_write();
-            } else {
-                local = decompress_read();
+            constexpr int kIters = 11;
+            Metrics sum{};
+            std::uint64_t max_raw_bytes = 0;
+            if (rank_ == 0) {
+                std::cout << "  Progress: 0/" << kIters << "\r" << std::flush;
             }
+            for (int iter = 0; iter < kIters; ++iter) {
+                show_io_banner_ = (iter == 0);
+                Metrics local;
+                if (options_.mode == Mode::Compress) {
+                    local = compress_write();
+                } else {
+                    local = decompress_read();
+                }
+                if (rank_ == 0) {
+                    std::cout << "  Progress: " << (iter + 1) << "/" << kIters << "\r" << std::flush;
+                }
+                max_raw_bytes = std::max(max_raw_bytes, local.raw_bytes);
+                if (iter == 0) {
+                    continue;
+                }
+                sum.raw_io_s += local.raw_io_s;
+                sum.h5_io_s += local.h5_io_s;
+            }
+            if (rank_ == 0) {
+                std::cout << "\n";
+            }
+            Metrics local{};
+            const double denom = static_cast<double>(kIters - 1);
+            local.raw_io_s = sum.raw_io_s / denom;
+            local.h5_io_s = sum.h5_io_s / denom;
+            local.raw_bytes = max_raw_bytes;
 
             finalize_and_report(local);
         } catch (const std::exception& e) {
@@ -271,6 +297,7 @@ private:
 
     int rank_ = 0;
     int ranks_ = 1;
+    bool show_io_banner_ = true;
 
     mans::h5::data_gen::SyntheticConfig synth_cfg_{};
     std::size_t total_elements_ = 0;
@@ -386,7 +413,7 @@ private:
         CHECK_H5(H5Pset_chunk(dcpl, 1, chunk));
 
         if (options_.filter_id == FILTER_ID_NONE) {
-            if (rank_ == 0) {
+            if (show_io_banner_ && rank_ == 0) {
                 std::cout << "  -> Filter: " << BLU << "None" << RST << "\n";
             }
             return;
@@ -394,7 +421,7 @@ private:
 
         if (options_.filter_id == FILTER_ID_DEFLATE) {
             const unsigned int gzip_level = 6;
-            if (rank_ == 0) {
+            if (show_io_banner_ && rank_ == 0) {
                 std::cout << "  -> Filter: " << BLU << "GZIP (Level " << gzip_level << ")" << RST << "\n";
             }
             CHECK_H5(H5Pset_deflate(dcpl, gzip_level));
@@ -403,7 +430,7 @@ private:
 
         if (options_.filter_id == FILTER_ID_ZSTD) {
             const unsigned int zstd_level = 3;
-            if (rank_ == 0) {
+            if (show_io_banner_ && rank_ == 0) {
                 std::cout << "  -> Filter: " << BLU << "Zstandard (Level " << zstd_level << ")" << RST << "\n";
             }
             const htri_t avail = H5Zfilter_avail(FILTER_ID_ZSTD);
@@ -419,7 +446,7 @@ private:
             if (!mans_config_) {
                 throw std::runtime_error("MANS filter requires --mans-config <file>");
             }
-            if (rank_ == 0) {
+            if (show_io_banner_ && rank_ == 0) {
                 std::cout << "  -> Filter: " << BLU << "MANS Custom (ID " << FILTER_ID_MANS << ")" << RST << "\n";
             }
             const auto cd = mans_config_->to_cd_values();
@@ -428,7 +455,7 @@ private:
         }
 
         if (options_.filter_id == FILTER_ID_SZ3) {
-            if (rank_ == 0) {
+            if (show_io_banner_ && rank_ == 0) {
                 std::cout << "  -> Filter: " << BLU << "SZ3 Compressor (ID " << FILTER_ID_SZ3 << ")" << RST << "\n";
             }
             const htri_t avail = H5Zfilter_avail(FILTER_ID_SZ3);
@@ -481,7 +508,7 @@ OpenMP = YES
     }
 
     Metrics compress_write() {
-        if (rank_ == 0) {
+        if (show_io_banner_ && rank_ == 0) {
             std::cout << BOLD << "[Compress] Writing chunked dataset..." << RST << "\n";
         }
 
@@ -560,7 +587,7 @@ OpenMP = YES
     }
 
     Metrics decompress_read() {
-        if (rank_ == 0) {
+        if (show_io_banner_ && rank_ == 0) {
             std::cout << BOLD << "[Decompress] Reading chunked dataset..." << RST << "\n";
         }
 
@@ -641,6 +668,7 @@ OpenMP = YES
         Metrics agg = local;
 
 #if defined(H5_HAVE_PARALLEL)
+        std::vector<std::uint64_t> per_rank_raw_bytes;
         auto reduce_max = [&](double v) {
             double out = 0.0;
             MPI_Reduce(&v, &out, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
@@ -655,6 +683,13 @@ OpenMP = YES
         agg.raw_io_s = reduce_max(local.raw_io_s);
         agg.h5_io_s = reduce_max(local.h5_io_s);
         agg.raw_bytes = reduce_sum_u64(local.raw_bytes);
+
+        if (rank_ == 0) {
+            per_rank_raw_bytes.resize(static_cast<std::size_t>(ranks_), 0);
+        }
+        MPI_Gather(&local.raw_bytes, 1, MPI_UINT64_T,
+                   per_rank_raw_bytes.data(), 1, MPI_UINT64_T,
+                   0, MPI_COMM_WORLD);
 #else
         (void)local;
 #endif
@@ -675,6 +710,29 @@ OpenMP = YES
             std::cout << "  h5dread_s:      " << BLU << agg.h5_io_s << RST << " (" << BLU << h5_thr << " MB/s" << RST << ")\n";
             std::cout << "  raw_write_s:    " << BLU << agg.raw_io_s << RST << " (" << BLU << raw_io_thr << " MB/s" << RST << ")\n";
         }
+
+#if defined(H5_HAVE_PARALLEL)
+        if (!per_rank_raw_bytes.empty()) {
+            double max_local_raw_mb = 0.0;
+            for (const auto bytes : per_rank_raw_bytes) {
+                max_local_raw_mb = std::max(max_local_raw_mb,
+                                            static_cast<double>(bytes) / 1048576.0);
+            }
+            const double local_raw_thr = agg.raw_io_s > 0.0 ? max_local_raw_mb / agg.raw_io_s : 0.0;
+            const double local_h5_thr = agg.h5_io_s > 0.0 ? max_local_raw_mb / agg.h5_io_s : 0.0;
+            if (options_.mode == Mode::Compress) {
+                std::cout << "  local_raw_read_s:  " << BLU << agg.raw_io_s << RST
+                          << " (" << BLU << local_raw_thr << " MB/s" << RST << ")\n";
+                std::cout << "  local_h5dwrite_s:  " << BLU << agg.h5_io_s << RST
+                          << " (" << BLU << local_h5_thr << " MB/s" << RST << ")\n";
+            } else {
+                std::cout << "  local_h5dread_s:   " << BLU << agg.h5_io_s << RST
+                          << " (" << BLU << local_h5_thr << " MB/s" << RST << ")\n";
+                std::cout << "  local_raw_write_s: " << BLU << agg.raw_io_s << RST
+                          << " (" << BLU << local_raw_thr << " MB/s" << RST << ")\n";
+            }
+        }
+#endif
 
         const std::string csv_path = options_.metrics_csv.empty()
             ? (options_.output_h5 + ".mpi_metrics.csv")
