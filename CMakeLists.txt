@@ -132,18 +132,18 @@ if(BUILD_CPU)
 
   # ========== MPI Benchmarks ==========
   find_package(MPI REQUIRED)
-  add_executable(cpu_mans_mpi_compress
-    cpu/cpu_mans_mpi_compress.cpp
+  add_executable(cpu_mans_mpi_bench
+    cpu/cpu_mans_mpi_bench.cpp
   )
-  set_target_properties(cpu_mans_mpi_compress PROPERTIES
+  set_target_properties(cpu_mans_mpi_bench PROPERTIES
       RUNTIME_OUTPUT_DIRECTORY ${cpu_root_binary_dir}
   )
-  target_compile_options(cpu_mans_mpi_compress PRIVATE $<$<CONFIG:Release>:-O3>)
-  target_include_directories(cpu_mans_mpi_compress PRIVATE
+  target_compile_options(cpu_mans_mpi_bench PRIVATE $<$<CONFIG:Release>:-O3>)
+  target_include_directories(cpu_mans_mpi_bench PRIVATE
       ${CMAKE_SOURCE_DIR}
       ${CMAKE_SOURCE_DIR}/tools/H5Z-MANS/include
   )
-  target_link_libraries(cpu_mans_mpi_compress PRIVATE mans_common MPI::MPI_CXX OpenMP::OpenMP_CXX)
+  target_link_libraries(cpu_mans_mpi_bench PRIVATE mans_common MPI::MPI_CXX OpenMP::OpenMP_CXX)
 
   add_executable(cpu_mans_mpi_decompress
     cpu/cpu_mans_mpi_decompress.cpp
