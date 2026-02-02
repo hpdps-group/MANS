@@ -12,6 +12,7 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -168,6 +169,12 @@ static std::string trim_copy(const std::string& str) {
     }
     const auto last = str.find_last_not_of(whitespace);
     return str.substr(first, last - first + 1);
+}
+
+static std::string format_ratio_x(double value) {
+    std::ostringstream oss;
+    oss << std::setprecision(3) << std::defaultfloat << value;
+    return oss.str() + "x";
 }
 
 static FilterId parse_filter(std::string_view name) {
@@ -474,7 +481,7 @@ static void append_metrics_csv(const std::string& csv_path,
     const double write_thr = agg.io_write_s > 0.0 ? raw_mb / agg.io_write_s : 0.0;
     const double comp_write_s = agg.comp_s + agg.io_write_s;
     const double comp_write_thr = comp_write_s > 0.0 ? raw_mb / comp_write_s : 0.0;
-    const double ratio = agg.raw_bytes > 0 ? static_cast<double>(agg.comp_bytes) / agg.raw_bytes : 0.0;
+    const double ratio = agg.comp_bytes > 0 ? static_cast<double>(agg.raw_bytes) / agg.comp_bytes : 0.0;
 
     out << mode_to_string(opts.mode) << ","
         << (opts.filter == FilterId::Mans ? "mans" : "none") << ","
@@ -491,11 +498,17 @@ static void append_metrics_csv(const std::string& csv_path,
         << comp_thr << ","
         << write_thr << ","
         << comp_write_thr << ","
-        << ratio
+        << format_ratio_x(ratio)
         << "\n";
 }
 
-static int run_decompress_mode(const MpiContext& mpi, RunOptions opts) {
+static int run_decompress_mode(const MpiContext& mpi,
+                               RunOptions opts,
+                               const std::uint8_t* expected_bytes,
+                               std::size_t expected_size,
+                               bool verify,
+                               int iters,
+                               bool skip_first_iter) {
     mans::container::ContainerHeader header{};
     std::vector<mans::container::IndexEntry> index_entries;
     if (mpi.rank == 0) {
@@ -649,115 +662,205 @@ static int run_decompress_mode(const MpiContext& mpi, RunOptions opts) {
     local.raw_bytes = static_cast<std::uint64_t>(rank_count) * elem_size;
     local.comp_bytes = 0;
 
-    if (rank_count > 0 && total_raw_bytes > 0) {
-        int in_fd = open(opts.input_bin.c_str(), O_RDONLY);
-        int out_fd = open(opts.output_bin.c_str(), O_WRONLY);
-        if (in_fd < 0 || out_fd < 0) {
-            if (mpi.rank == 0) {
-                std::cerr << "[Error] Failed to open input/output files.\n";
-            }
-            if (in_fd >= 0) {
-                close(in_fd);
-            }
-            if (out_fd >= 0) {
-                close(out_fd);
-            }
-            return 1;
-        }
-
-        const std::size_t raw_bytes = rank_count * elem_size;
-        std::vector<std::uint8_t> raw_buf(raw_bytes, 0);
+    std::uint64_t local_comp_bytes = 0;
+    {
         const std::uint64_t rank_start = static_cast<std::uint64_t>(rank_offset) * elem_size;
-        const std::uint64_t rank_end = rank_start + raw_bytes;
-
+        const std::uint64_t rank_end = rank_start + static_cast<std::uint64_t>(rank_count) * elem_size;
         std::uint64_t chunk_raw_start = 0;
-        for (std::size_t i = 0; i < index_entries.size(); ++i) {
-            const auto& entry = index_entries[i];
+        for (const auto& entry : index_entries) {
             const std::uint64_t chunk_raw_end = chunk_raw_start + entry.raw_len;
-            if (chunk_raw_end <= rank_start || chunk_raw_start >= rank_end) {
-                chunk_raw_start = chunk_raw_end;
-                continue;
-            }
-
-            mans::container::ChunkHeader chunk_header{};
-            read_fully(in_fd, &chunk_header, sizeof(chunk_header), entry.offset);
-            if (!mans::container::magic_matches(
-                    chunk_header.magic, mans::container::kChunkMagic,
-                    sizeof(mans::container::kChunkMagic)) ||
-                chunk_header.version != mans::container::kChunkVersion ||
-                chunk_header.header_bytes != sizeof(mans::container::ChunkHeader) ||
-                chunk_header.comp_len != entry.comp_len ||
-                chunk_header.raw_len != entry.raw_len) {
-                throw std::runtime_error("Invalid chunk header");
-            }
-
-            const std::uint64_t payload_offset =
-                entry.offset + sizeof(mans::container::ChunkHeader);
-
-            const std::uint64_t copy_start = std::max(chunk_raw_start, rank_start);
-            const std::uint64_t copy_end = std::min(chunk_raw_end, rank_end);
-            const std::size_t copy_len = static_cast<std::size_t>(copy_end - copy_start);
-            const std::size_t chunk_offset = static_cast<std::size_t>(copy_start - chunk_raw_start);
-            const std::size_t rank_offset_bytes = static_cast<std::size_t>(copy_start - rank_start);
-
             if (chunk_raw_start >= rank_start && chunk_raw_start < rank_end) {
-                local.comp_bytes += entry.comp_len;
+                local_comp_bytes += entry.comp_len;
             }
-
-            if (raw_payload) {
-                auto t0 = std::chrono::steady_clock::now();
-                read_fully(in_fd,
-                           raw_buf.data() + rank_offset_bytes,
-                           copy_len,
-                           payload_offset + chunk_offset);
-                auto t1 = std::chrono::steady_clock::now();
-                local.io_read_s += std::chrono::duration<double>(t1 - t0).count();
-            } else {
-                std::vector<std::uint8_t> comp_buf(static_cast<std::size_t>(entry.comp_len));
-                auto t0 = std::chrono::steady_clock::now();
-                read_fully(in_fd, comp_buf.data(), comp_buf.size(), payload_offset);
-                auto t1 = std::chrono::steady_clock::now();
-                local.io_read_s += std::chrono::duration<double>(t1 - t0).count();
-
-                std::vector<std::uint8_t> chunk_raw(static_cast<std::size_t>(entry.raw_len));
-                std::size_t out_size = chunk_raw.size();
-                auto t2 = std::chrono::steady_clock::now();
-                mans::decompress(comp_buf.data(),
-                                 comp_buf.size(),
-                                 params,
-                                 chunk_raw.data(),
-                                 out_size);
-                auto t3 = std::chrono::steady_clock::now();
-                local.comp_s += std::chrono::duration<double>(t3 - t2).count();
-                if (out_size != entry.raw_len) {
-                    throw std::runtime_error("Decompressed size mismatch");
-                }
-                std::memcpy(raw_buf.data() + rank_offset_bytes,
-                            chunk_raw.data() + chunk_offset,
-                            copy_len);
-            }
-
             chunk_raw_start = chunk_raw_end;
         }
+    }
+    local.comp_bytes = local_comp_bytes;
 
-        auto t4 = std::chrono::steady_clock::now();
-        write_fully(out_fd,
-                    raw_buf.data(),
-                    raw_buf.size(),
-                    static_cast<std::uint64_t>(rank_offset) * elem_size);
-        auto t5 = std::chrono::steady_clock::now();
-        local.io_write_s += std::chrono::duration<double>(t5 - t4).count();
+    const int total_iters = (iters > 0) ? iters : 1;
+    const int warmup_skip = (skip_first_iter && total_iters > 1) ? 1 : 0;
+    double total_io_read_s = 0.0;
+    double total_comp_s = 0.0;
+    double total_io_write_s = 0.0;
 
-        close(in_fd);
-        close(out_fd);
+    for (int iter = 0; iter < total_iters; ++iter) {
+        if (mpi.rank == 0 && total_iters > 1) {
+            const char* label = (opts.mode == BenchMode::Bench) ? "[Bench-Decompress]" : "[Decompress]";
+            std::cout << "\r" << kAnsiDim << label << " iter "
+                      << (iter + 1) << "/" << total_iters << kAnsiReset << std::flush;
+        }
+
+        double iter_io_read_s = 0.0;
+        double iter_comp_s = 0.0;
+        double iter_io_write_s = 0.0;
+
+        if (rank_count > 0 && total_raw_bytes > 0) {
+            int in_fd = open(opts.input_bin.c_str(), O_RDONLY);
+            int out_fd = open(opts.output_bin.c_str(), O_WRONLY);
+            if (in_fd < 0 || out_fd < 0) {
+                if (mpi.rank == 0) {
+                    std::cerr << "[Error] Failed to open input/output files.\n";
+                }
+                if (in_fd >= 0) {
+                    close(in_fd);
+                }
+                if (out_fd >= 0) {
+                    close(out_fd);
+                }
+                return 1;
+            }
+
+            const std::size_t raw_bytes = rank_count * elem_size;
+            std::vector<std::uint8_t> raw_buf(raw_bytes, 0);
+            const std::uint64_t rank_start = static_cast<std::uint64_t>(rank_offset) * elem_size;
+            const std::uint64_t rank_end = rank_start + raw_bytes;
+
+            std::uint64_t chunk_raw_start = 0;
+            for (std::size_t i = 0; i < index_entries.size(); ++i) {
+                const auto& entry = index_entries[i];
+                const std::uint64_t chunk_raw_end = chunk_raw_start + entry.raw_len;
+                if (chunk_raw_end <= rank_start || chunk_raw_start >= rank_end) {
+                    chunk_raw_start = chunk_raw_end;
+                    continue;
+                }
+
+                mans::container::ChunkHeader chunk_header{};
+                read_fully(in_fd, &chunk_header, sizeof(chunk_header), entry.offset);
+                if (!mans::container::magic_matches(
+                        chunk_header.magic, mans::container::kChunkMagic,
+                        sizeof(mans::container::kChunkMagic)) ||
+                    chunk_header.version != mans::container::kChunkVersion ||
+                    chunk_header.header_bytes != sizeof(mans::container::ChunkHeader) ||
+                    chunk_header.comp_len != entry.comp_len ||
+                    chunk_header.raw_len != entry.raw_len) {
+                    throw std::runtime_error("Invalid chunk header");
+                }
+
+                const std::uint64_t payload_offset =
+                    entry.offset + sizeof(mans::container::ChunkHeader);
+
+                const std::uint64_t copy_start = std::max(chunk_raw_start, rank_start);
+                const std::uint64_t copy_end = std::min(chunk_raw_end, rank_end);
+                const std::size_t copy_len = static_cast<std::size_t>(copy_end - copy_start);
+                const std::size_t chunk_offset = static_cast<std::size_t>(copy_start - chunk_raw_start);
+                const std::size_t rank_offset_bytes = static_cast<std::size_t>(copy_start - rank_start);
+
+                if (raw_payload) {
+                    auto t0 = std::chrono::steady_clock::now();
+                    read_fully(in_fd,
+                               raw_buf.data() + rank_offset_bytes,
+                               copy_len,
+                               payload_offset + chunk_offset);
+                    auto t1 = std::chrono::steady_clock::now();
+                    iter_io_read_s += std::chrono::duration<double>(t1 - t0).count();
+                } else {
+                    std::vector<std::uint8_t> comp_buf(static_cast<std::size_t>(entry.comp_len));
+                    auto t0 = std::chrono::steady_clock::now();
+                    read_fully(in_fd, comp_buf.data(), comp_buf.size(), payload_offset);
+                    auto t1 = std::chrono::steady_clock::now();
+                    iter_io_read_s += std::chrono::duration<double>(t1 - t0).count();
+
+                    std::vector<std::uint8_t> chunk_raw(static_cast<std::size_t>(entry.raw_len));
+                    std::size_t out_size = chunk_raw.size();
+                    auto t2 = std::chrono::steady_clock::now();
+                    mans::decompress(comp_buf.data(),
+                                     comp_buf.size(),
+                                     params,
+                                     chunk_raw.data(),
+                                     out_size);
+                    auto t3 = std::chrono::steady_clock::now();
+                    iter_comp_s += std::chrono::duration<double>(t3 - t2).count();
+                    if (out_size != entry.raw_len) {
+                        throw std::runtime_error("Decompressed size mismatch");
+                    }
+                    std::memcpy(raw_buf.data() + rank_offset_bytes,
+                                chunk_raw.data() + chunk_offset,
+                                copy_len);
+                }
+
+                chunk_raw_start = chunk_raw_end;
+            }
+
+            const bool do_verify = verify && (iter == total_iters - 1);
+            bool verify_ok = true;
+            if (do_verify) {
+                if (raw_buf.size() != expected_size) {
+                    verify_ok = false;
+                    std::cerr << "[Error] Verify size mismatch at rank " << mpi.rank
+                              << ": expected " << expected_size
+                              << " bytes, got " << raw_buf.size() << " bytes.\n";
+                } else if (expected_size > 0 && expected_bytes == nullptr) {
+                    verify_ok = false;
+                    std::cerr << "[Error] Verify buffer missing at rank " << mpi.rank << ".\n";
+                } else if (expected_size > 0 &&
+                           std::memcmp(expected_bytes, raw_buf.data(), raw_buf.size()) != 0) {
+                    verify_ok = false;
+                    std::size_t idx = 0;
+                    const auto* exp = expected_bytes;
+                    const auto* got = raw_buf.data();
+                    for (; idx < raw_buf.size(); ++idx) {
+                        if (exp[idx] != got[idx]) {
+                            break;
+                        }
+                    }
+                    if (idx < raw_buf.size()) {
+                        const std::size_t elem = elem_size > 0 ? idx / elem_size : 0;
+                        const std::size_t byte_in_elem = elem_size > 0 ? idx % elem_size : 0;
+                        std::cerr << "[Error] Verify mismatch at rank " << mpi.rank
+                                  << " byte " << idx
+                                  << " (elem " << elem << ", byte " << byte_in_elem << "): expected "
+                                  << static_cast<unsigned int>(exp[idx]) << " got "
+                                  << static_cast<unsigned int>(got[idx]) << "\n";
+                    } else {
+                        std::cerr << "[Error] Verify mismatch at rank " << mpi.rank << ".\n";
+                    }
+                }
+            }
+
+            auto t4 = std::chrono::steady_clock::now();
+            write_fully(out_fd,
+                        raw_buf.data(),
+                        raw_buf.size(),
+                        static_cast<std::uint64_t>(rank_offset) * elem_size);
+            auto t5 = std::chrono::steady_clock::now();
+            iter_io_write_s += std::chrono::duration<double>(t5 - t4).count();
+
+            close(in_fd);
+            close(out_fd);
+
+            if (do_verify) {
+                int local_ok = verify_ok ? 1 : 0;
+                int all_ok = 0;
+                MPI_Allreduce(&local_ok, &all_ok, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+                if (all_ok == 0) {
+                    if (mpi.rank == 0) {
+                        std::cerr << "[Error] Decompression verification failed.\n";
+                    }
+                    return 1;
+                }
+            }
+        }
+
+        auto reduce_max = [&](double v) {
+            double out = 0.0;
+            MPI_Reduce(&v, &out, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+            return out;
+        };
+        const double iter_io_read_max = reduce_max(iter_io_read_s);
+        const double iter_comp_max = reduce_max(iter_comp_s);
+        const double iter_io_write_max = reduce_max(iter_io_write_s);
+
+        if (mpi.rank == 0 && iter >= warmup_skip) {
+            total_io_read_s += iter_io_read_max;
+            total_comp_s += iter_comp_max;
+            total_io_write_s += iter_io_write_max;
+        }
     }
 
-    Metrics agg = local;
-    auto reduce_max = [&](double v) {
-        double out = 0.0;
-        MPI_Reduce(&v, &out, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
-        return out;
-    };
+    if (mpi.rank == 0 && total_iters > 1) {
+        std::cout << "\n";
+    }
+
     auto reduce_sum_u64 = [&](std::uint64_t v) {
         std::uint64_t out = 0;
         MPI_Reduce(&v, &out, 1, MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
@@ -769,9 +872,13 @@ static int run_decompress_mode(const MpiContext& mpi, RunOptions opts) {
         return out;
     };
 
-    agg.io_read_s = reduce_max(local.io_read_s);
-    agg.comp_s = reduce_max(local.comp_s);
-    agg.io_write_s = reduce_max(local.io_write_s);
+    Metrics agg{};
+    const double denom = static_cast<double>(total_iters - warmup_skip);
+    if (mpi.rank == 0 && denom > 0.0) {
+        agg.io_read_s = total_io_read_s / denom;
+        agg.comp_s = total_comp_s / denom;
+        agg.io_write_s = total_io_write_s / denom;
+    }
     agg.raw_bytes = reduce_sum_u64(local.raw_bytes);
     agg.comp_bytes = reduce_sum_u64(local.comp_bytes);
     const std::uint64_t max_raw_bytes = reduce_max_u64(local.raw_bytes);
@@ -790,7 +897,7 @@ static int run_decompress_mode(const MpiContext& mpi, RunOptions opts) {
         const double write_thr_local = agg.io_write_s > 0.0 ? local_raw_mb / agg.io_write_s : 0.0;
         const double decomp_write_thr_local =
             decomp_write_s > 0.0 ? local_raw_mb / decomp_write_s : 0.0;
-        const double ratio = agg.raw_bytes > 0 ? static_cast<double>(agg.comp_bytes) / agg.raw_bytes : 0.0;
+        const double ratio = agg.comp_bytes > 0 ? static_cast<double>(agg.raw_bytes) / agg.comp_bytes : 0.0;
 
         const std::string dtype_str = (params.dtype == mans::DataType::U16) ? "u2" : "u4";
         std::cout << kAnsiBold << "Mans mpi bench finished!" << kAnsiReset
@@ -821,7 +928,7 @@ static int run_decompress_mode(const MpiContext& mpi, RunOptions opts) {
                           : 0.0)
                   << "\n";
         std::cout << "  " << kAnsiYellow << "Ratio" << kAnsiReset << ": "
-                  << ratio << "\n";
+                  << format_ratio_x(ratio) << "\n";
         std::cout << kAnsiDim << "  Local max (MB/s): read=" << read_thr_local
                   << ", decomp=" << decomp_thr_local
                   << ", write=" << write_thr_local
@@ -863,7 +970,7 @@ int main(int argc, char** argv) {
     }
 
     if (opts.mode == BenchMode::Decompress) {
-        return run_decompress_mode(mpi, opts);
+        return run_decompress_mode(mpi, opts, nullptr, 0, false, 1, false);
     }
 
     std::optional<mans::h5::MansConfig> mans_cfg;
@@ -1409,7 +1516,7 @@ int main(int argc, char** argv) {
         const double comp_thr_local = avg_comp_s > 0.0 ? local_raw_mb / avg_comp_s : 0.0;
         const double write_thr_local = avg_io_write_s > 0.0 ? local_raw_mb / avg_io_write_s : 0.0;
         const double comp_write_thr_local = comp_write_s > 0.0 ? local_raw_mb / comp_write_s : 0.0;
-        const double ratio = agg_raw_bytes > 0 ? static_cast<double>(last_comp_bytes) / agg_raw_bytes : 0.0;
+        const double ratio = last_comp_bytes > 0 ? static_cast<double>(agg_raw_bytes) / last_comp_bytes : 0.0;
 
         const std::string dtype_str = (dtype == mans::DataType::U16) ? "u2" : "u4";
         std::cout << kAnsiBold << "Mans mpi bench finished!" << kAnsiReset
@@ -1441,7 +1548,7 @@ int main(int argc, char** argv) {
                           : 0.0)
                   << "\n";
         std::cout << "  " << kAnsiYellow << "Ratio" << kAnsiReset << ": "
-                  << ratio << "\n";
+                  << format_ratio_x(ratio) << "\n";
         std::cout << kAnsiDim << "  Local max (MB/s): read=" << read_thr_local
                   << ", comp=" << comp_thr_local
                   << ", write=" << write_thr_local
@@ -1460,6 +1567,33 @@ int main(int argc, char** argv) {
         append_metrics_csv(csv_path, opts, total_elems, elem_size_final, mpi.ranks, agg);
         std::cout << "  metrics_csv:    " << csv_path << "\n";
         std::cout << "  timing_csv:     " << timing_comp_path << "\n";
+    }
+
+    if (opts.mode == BenchMode::Bench) {
+        if (opts.raw_io) {
+            if (mpi.rank == 0) {
+                std::cerr << "[WARN] Bench verify skipped for --raw-io (no container to decompress).\n";
+            }
+        } else {
+            RunOptions decomp_opts = opts;
+            decomp_opts.mode = BenchMode::Decompress;
+            decomp_opts.input_bin = opts.output_bin;
+            decomp_opts.output_bin = opts.output_bin + ".decomp.bin";
+            if (mpi.rank == 0) {
+                std::cout << "\n";
+            }
+            const int decomp_rc = run_decompress_mode(
+                mpi,
+                decomp_opts,
+                raw_bytes_buf.empty() ? nullptr : raw_bytes_buf.data(),
+                raw_bytes_buf.size(),
+                true,
+                kIters,
+                true);
+            if (decomp_rc != 0) {
+                return decomp_rc;
+            }
+        }
     }
 
     return 0;
