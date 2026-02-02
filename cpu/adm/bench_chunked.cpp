@@ -201,6 +201,11 @@ int run_bench_for_type(const std::vector<T>& input,
             chunk_elements = 1;
         }
 
+        std::size_t chunk_bytes = chunk_elements * sizeof(T);
+        std::string label = format_chunk_label(chunk_bytes);
+        std::cout << "[RUN] Chunk " << label << " (" << chunk_bytes << " bytes)\n"
+                  << std::flush;
+
         std::vector<ChunkInfo> chunks = build_chunks<T>(total_elements, chunk_elements);
         std::size_t max_chunk_len = 0;
         std::size_t total_max_bytes = 0;
@@ -246,8 +251,6 @@ int run_bench_for_type(const std::vector<T>& input,
         double decomp_mbps = (static_cast<double>(total_bytes) / 1e6) /
                              (avg_decomp_ms / 1e3);
 
-        std::size_t chunk_bytes = chunk_elements * sizeof(T);
-        std::string label = format_chunk_label(chunk_bytes);
         std::cout << std::left << std::setw(8) << label
                   << " | " << std::setw(8) << std::fixed << std::setprecision(2)
                   << ratio << "%"

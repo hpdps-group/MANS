@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -50,6 +51,40 @@ enum class FilterId : std::uint32_t {
     Mans = 1,
 };
 
+enum class BenchMode : std::uint32_t {
+    Bench = 0,
+    Compress = 1,
+    Decompress = 2,
+};
+
+static bool parse_mode(std::string_view text, BenchMode& mode) {
+    if (text == "bench") {
+        mode = BenchMode::Bench;
+        return true;
+    }
+    if (text == "compress") {
+        mode = BenchMode::Compress;
+        return true;
+    }
+    if (text == "decompress") {
+        mode = BenchMode::Decompress;
+        return true;
+    }
+    return false;
+}
+
+static const char* mode_to_string(BenchMode mode) {
+    switch (mode) {
+        case BenchMode::Bench:
+            return "bench";
+        case BenchMode::Compress:
+            return "compress";
+        case BenchMode::Decompress:
+            return "decompress";
+    }
+    return "bench";
+}
+
 struct RunOptions {
     std::string input_bin;
     std::string output_bin;
@@ -59,8 +94,10 @@ struct RunOptions {
 
     double chunk_mb = kDefaultChunkMb;
     FilterId filter = FilterId::Mans;
+    BenchMode mode = BenchMode::Bench;
     int expected_ranks = -1;
     std::optional<std::uint32_t> dtype_override;
+    bool filter_seen = false;
     bool mode_seen = false;
     bool raw_io = false;
 };
@@ -102,6 +139,11 @@ struct MpiContext {
 struct ChunkInfo {
     std::size_t offset = 0;
     std::size_t len = 0;
+};
+
+struct PayloadBlock {
+    std::unique_ptr<std::uint8_t, decltype(&std::free)> data{nullptr, &std::free};
+    std::size_t size = 0;
 };
 
 static std::vector<ChunkInfo> build_chunks(std::size_t total_elements, std::size_t chunk_elements) {
@@ -256,12 +298,14 @@ static std::optional<RunOptions> parse_args(int argc, char** argv, int rank) {
             }
             if (key == "filter") {
                 opts.filter = parse_filter(val);
+                opts.filter_seen = true;
                 continue;
             }
             if (key == "mode") {
                 opts.mode_seen = true;
-                if (val != "compress") {
-                    throw std::runtime_error("mode must be 'compress' for cpu_mans_mpi_bench");
+                if (!parse_mode(val, opts.mode)) {
+                    throw std::runtime_error(
+                        "mode must be one of 'compress', 'decompress', 'bench' for cpu_mans_mpi_bench");
                 }
                 continue;
             }
@@ -326,13 +370,15 @@ static std::optional<RunOptions> parse_args(int argc, char** argv, int rank) {
         }
         if (arg == "--filter") {
             opts.filter = parse_filter(need_value("--filter"));
+            opts.filter_seen = true;
             continue;
         }
         if (arg == "--mode") {
             opts.mode_seen = true;
             const auto mode_val = need_value("--mode");
-            if (mode_val != "compress") {
-                throw std::runtime_error("mode must be 'compress' for cpu_mans_mpi_bench");
+            if (!parse_mode(mode_val, opts.mode)) {
+                throw std::runtime_error(
+                    "mode must be one of 'compress', 'decompress', 'bench' for cpu_mans_mpi_bench");
             }
             continue;
         }
@@ -364,7 +410,8 @@ static std::optional<RunOptions> parse_args(int argc, char** argv, int rank) {
             if (rank == 0) {
                 std::cerr << "Usage:\n  " << argv[0]
                           << " --config mpi_mans.cfg [--input raw.bin] [--output out.bin]\\\n"
-                             "         [--chunk-mb MB] [--filter mans|none] [--mans-config mans.cfg]\\\n"
+                             "         [--chunk-mb MB] [--filter mans|none] [--mode compress|decompress|bench]\\\n"
+                             "         [--mans-config mans.cfg]\\\n"
                              "         [--dataset-config synth.cfg] [--dtype u16|u32] [--csv metrics.csv]\\\n"
                              "         [--raw-io]\n";
             }
@@ -374,14 +421,23 @@ static std::optional<RunOptions> parse_args(int argc, char** argv, int rank) {
         throw std::runtime_error("Unknown argument: " + arg);
     }
 
-    if (opts.output_bin.empty() && opts.dataset_config_file.empty()) {
+    if (opts.mode == BenchMode::Decompress && (opts.input_bin.empty() || opts.output_bin.empty())) {
+        if (rank == 0) {
+            std::cerr << "[Error] --mode decompress requires both --input and --output.\n";
+        }
+        return std::nullopt;
+    }
+
+    if (opts.mode != BenchMode::Decompress && opts.output_bin.empty() && opts.dataset_config_file.empty()) {
         if (rank == 0) {
             std::cerr << "[Error] output_bin is required (or provide dataset_config_file with output_bin).\n";
         }
         return std::nullopt;
     }
 
-    if (opts.filter == FilterId::Mans && opts.mans_config_file.empty()) {
+    if (opts.mode != BenchMode::Decompress &&
+        opts.filter == FilterId::Mans &&
+        opts.mans_config_file.empty()) {
         if (rank == 0) {
             std::cerr << "[Error] --mans-config is required when --filter mans\n";
         }
@@ -411,16 +467,18 @@ static void append_metrics_csv(const std::string& csv_path,
 
     const double raw_mb = static_cast<double>(agg.raw_bytes) / 1048576.0;
     const double comp_mb = static_cast<double>(agg.comp_bytes) / 1048576.0;
-    const double read_thr = agg.io_read_s > 0.0 ? raw_mb / agg.io_read_s : 0.0;
+    const double read_thr = agg.io_read_s > 0.0
+        ? ((opts.mode == BenchMode::Decompress) ? (comp_mb / agg.io_read_s) : (raw_mb / agg.io_read_s))
+        : 0.0;
     const double comp_thr = agg.comp_s > 0.0 ? raw_mb / agg.comp_s : 0.0;
     const double write_thr = agg.io_write_s > 0.0 ? raw_mb / agg.io_write_s : 0.0;
     const double comp_write_s = agg.comp_s + agg.io_write_s;
     const double comp_write_thr = comp_write_s > 0.0 ? raw_mb / comp_write_s : 0.0;
     const double ratio = agg.raw_bytes > 0 ? static_cast<double>(agg.comp_bytes) / agg.raw_bytes : 0.0;
 
-    out << "compress,"
+    out << mode_to_string(opts.mode) << ","
         << (opts.filter == FilterId::Mans ? "mans" : "none") << ","
-        << opts.chunk_mb << ","
+        << (opts.mode == BenchMode::Decompress ? 0.0 : opts.chunk_mb) << ","
         << ranks << ","
         << total_elems << ","
         << elem_size << ","
@@ -435,6 +493,349 @@ static void append_metrics_csv(const std::string& csv_path,
         << comp_write_thr << ","
         << ratio
         << "\n";
+}
+
+static int run_decompress_mode(const MpiContext& mpi, RunOptions opts) {
+    mans::container::ContainerHeader header{};
+    std::vector<mans::container::IndexEntry> index_entries;
+    if (mpi.rank == 0) {
+        int fd = open(opts.input_bin.c_str(), O_RDONLY);
+        if (fd < 0) {
+            std::cerr << "[Error] Failed to open input_bin: " << opts.input_bin << "\n";
+            return 1;
+        }
+        read_fully(fd, &header, sizeof(header), 0);
+        if (!mans::container::magic_matches(
+                header.magic, mans::container::kContainerMagic,
+                sizeof(mans::container::kContainerMagic)) ||
+            header.version != mans::container::kContainerVersion ||
+            header.header_bytes != sizeof(mans::container::ContainerHeader)) {
+            std::cerr << "[Error] Invalid container header (magic/version mismatch)\n";
+            close(fd);
+            return 1;
+        }
+        if (header.chunk_header_bytes != sizeof(mans::container::ChunkHeader)) {
+            std::cerr << "[Error] Chunk header size mismatch\n";
+            close(fd);
+            return 1;
+        }
+        index_entries.resize(static_cast<std::size_t>(header.chunk_count));
+        if (header.chunk_count > 0) {
+            read_fully(fd,
+                       index_entries.data(),
+                       index_entries.size() * sizeof(mans::container::IndexEntry),
+                       static_cast<std::uint64_t>(header.index_offset));
+        }
+        close(fd);
+    }
+
+    MPI_Bcast(&header, sizeof(header), MPI_BYTE, 0, MPI_COMM_WORLD);
+    if (mpi.rank != 0) {
+        index_entries.resize(static_cast<std::size_t>(header.chunk_count));
+    }
+    if (!index_entries.empty()) {
+        MPI_Bcast(index_entries.data(),
+                  static_cast<int>(index_entries.size() * sizeof(mans::container::IndexEntry)),
+                  MPI_BYTE,
+                  0,
+                  MPI_COMM_WORLD);
+    }
+
+    const bool raw_payload =
+        (header.flags & mans::container::kFlagRawPayload) != 0;
+    const auto header_filter = raw_payload ? FilterId::None : FilterId::Mans;
+    if (!opts.filter_seen) {
+        opts.filter = header_filter;
+    } else if (opts.filter != header_filter) {
+        if (mpi.rank == 0) {
+            std::cerr << "[Error] Filter mismatch: config/CLI says "
+                      << (opts.filter == FilterId::Mans ? "mans" : "none")
+                      << ", header says " << (header_filter == FilterId::Mans ? "mans" : "none")
+                      << "\n";
+        }
+        return 1;
+    }
+
+    if (opts.filter == FilterId::Mans && opts.mans_config_file.empty()) {
+        if (mpi.rank == 0) {
+            std::cerr << "[Error] --mans-config is required when filter is mans\n";
+        }
+        return 1;
+    }
+
+    std::optional<mans::h5::MansConfig> mans_cfg;
+    mans::MansParams params{};
+    params.backend = mans::Backend::CPU;
+    params.dtype = mans::DataType::U32;
+    params.adm_threshold = 4000U;
+
+    if (opts.filter == FilterId::Mans) {
+        mans_cfg.emplace();
+        try {
+            mans_cfg->load(opts.mans_config_file);
+        } catch (const std::exception& e) {
+            if (mpi.rank == 0) {
+                std::cerr << "MANS config error: " << e.what() << "\n";
+            }
+            return 1;
+        }
+        params = mans_cfg->get_params();
+        params.backend = mans::Backend::CPU;
+    }
+
+    if (header.dtype != 1 && header.dtype != 2) {
+        if (mpi.rank == 0) {
+            std::cerr << "[Error] Unsupported dtype value in container header: "
+                      << static_cast<int>(header.dtype) << "\n";
+        }
+        return 1;
+    }
+    params.dtype = (header.dtype == 1) ? mans::DataType::U16 : mans::DataType::U32;
+    const std::size_t elem_size = (params.dtype == mans::DataType::U16) ? 2 : 4;
+    std::uint64_t total_raw_bytes = 0;
+    for (const auto& entry : index_entries) {
+        total_raw_bytes += entry.raw_len;
+    }
+    if (total_raw_bytes % elem_size != 0) {
+        if (mpi.rank == 0) {
+            std::cerr << "[Error] Total raw bytes not divisible by elem size.\n";
+        }
+        return 1;
+    }
+    const std::size_t total_elems = static_cast<std::size_t>(total_raw_bytes / elem_size);
+
+    if (opts.expected_ranks > 0 && opts.expected_ranks != mpi.ranks && mpi.rank == 0) {
+        std::cerr << "[WARN] --ranks " << opts.expected_ranks
+                  << " does not match MPI world size " << mpi.ranks << ". Using MPI size.\n";
+    }
+
+    std::size_t rank_offset = 0;
+    std::size_t rank_count = 0;
+    split_even(total_elems, mpi.rank, mpi.ranks, rank_offset, rank_count);
+
+    if (mpi.rank == 0) {
+        const std::string dtype_str = (params.dtype == mans::DataType::U16) ? "u2" : "u4";
+        std::cout << "  " << kAnsiCyan << "OMP max threads" << kAnsiReset << ": "
+                  << omp_get_max_threads() << "\n";
+        std::cout << kAnsiBold << "Command-line arguments:" << kAnsiReset << "\n";
+        std::cout << "  " << kAnsiCyan << "Mode" << kAnsiReset << ": " << mode_to_string(opts.mode) << "\n";
+        std::cout << "  " << kAnsiCyan << "Input type" << kAnsiReset << ": " << dtype_str << "\n";
+        std::cout << "  " << kAnsiCyan << "Input file" << kAnsiReset << ": " << opts.input_bin << "\n";
+        std::cout << "  " << kAnsiCyan << "Output file" << kAnsiReset << ": " << opts.output_bin << "\n";
+        std::cout << "  " << kAnsiCyan << "Filter" << kAnsiReset << ": "
+                  << (opts.filter == FilterId::Mans ? "mans" : "none") << "\n";
+        std::cout << "  " << kAnsiCyan << "MPI ranks" << kAnsiReset << ": " << mpi.ranks << "\n";
+        if (!opts.metrics_csv.empty()) {
+            std::cout << "  " << kAnsiCyan << "CSV output" << kAnsiReset << ": " << opts.metrics_csv << "\n";
+        }
+        std::cout << "\n";
+    }
+
+    if (mpi.rank == 0) {
+        int fd = open(opts.output_bin.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0644);
+        if (fd < 0) {
+            std::cerr << "[Error] Failed to create output_bin: " << opts.output_bin << "\n";
+            return 1;
+        }
+        if (ftruncate(fd, static_cast<off_t>(total_raw_bytes)) != 0) {
+            std::cerr << "[WARN] Failed to ftruncate output file.\n";
+        }
+        close(fd);
+    }
+
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    Metrics local{};
+    local.raw_bytes = static_cast<std::uint64_t>(rank_count) * elem_size;
+    local.comp_bytes = 0;
+
+    if (rank_count > 0 && total_raw_bytes > 0) {
+        int in_fd = open(opts.input_bin.c_str(), O_RDONLY);
+        int out_fd = open(opts.output_bin.c_str(), O_WRONLY);
+        if (in_fd < 0 || out_fd < 0) {
+            if (mpi.rank == 0) {
+                std::cerr << "[Error] Failed to open input/output files.\n";
+            }
+            if (in_fd >= 0) {
+                close(in_fd);
+            }
+            if (out_fd >= 0) {
+                close(out_fd);
+            }
+            return 1;
+        }
+
+        const std::size_t raw_bytes = rank_count * elem_size;
+        std::vector<std::uint8_t> raw_buf(raw_bytes, 0);
+        const std::uint64_t rank_start = static_cast<std::uint64_t>(rank_offset) * elem_size;
+        const std::uint64_t rank_end = rank_start + raw_bytes;
+
+        std::uint64_t chunk_raw_start = 0;
+        for (std::size_t i = 0; i < index_entries.size(); ++i) {
+            const auto& entry = index_entries[i];
+            const std::uint64_t chunk_raw_end = chunk_raw_start + entry.raw_len;
+            if (chunk_raw_end <= rank_start || chunk_raw_start >= rank_end) {
+                chunk_raw_start = chunk_raw_end;
+                continue;
+            }
+
+            mans::container::ChunkHeader chunk_header{};
+            read_fully(in_fd, &chunk_header, sizeof(chunk_header), entry.offset);
+            if (!mans::container::magic_matches(
+                    chunk_header.magic, mans::container::kChunkMagic,
+                    sizeof(mans::container::kChunkMagic)) ||
+                chunk_header.version != mans::container::kChunkVersion ||
+                chunk_header.header_bytes != sizeof(mans::container::ChunkHeader) ||
+                chunk_header.comp_len != entry.comp_len ||
+                chunk_header.raw_len != entry.raw_len) {
+                throw std::runtime_error("Invalid chunk header");
+            }
+
+            const std::uint64_t payload_offset =
+                entry.offset + sizeof(mans::container::ChunkHeader);
+
+            const std::uint64_t copy_start = std::max(chunk_raw_start, rank_start);
+            const std::uint64_t copy_end = std::min(chunk_raw_end, rank_end);
+            const std::size_t copy_len = static_cast<std::size_t>(copy_end - copy_start);
+            const std::size_t chunk_offset = static_cast<std::size_t>(copy_start - chunk_raw_start);
+            const std::size_t rank_offset_bytes = static_cast<std::size_t>(copy_start - rank_start);
+
+            if (chunk_raw_start >= rank_start && chunk_raw_start < rank_end) {
+                local.comp_bytes += entry.comp_len;
+            }
+
+            if (raw_payload) {
+                auto t0 = std::chrono::steady_clock::now();
+                read_fully(in_fd,
+                           raw_buf.data() + rank_offset_bytes,
+                           copy_len,
+                           payload_offset + chunk_offset);
+                auto t1 = std::chrono::steady_clock::now();
+                local.io_read_s += std::chrono::duration<double>(t1 - t0).count();
+            } else {
+                std::vector<std::uint8_t> comp_buf(static_cast<std::size_t>(entry.comp_len));
+                auto t0 = std::chrono::steady_clock::now();
+                read_fully(in_fd, comp_buf.data(), comp_buf.size(), payload_offset);
+                auto t1 = std::chrono::steady_clock::now();
+                local.io_read_s += std::chrono::duration<double>(t1 - t0).count();
+
+                std::vector<std::uint8_t> chunk_raw(static_cast<std::size_t>(entry.raw_len));
+                std::size_t out_size = chunk_raw.size();
+                auto t2 = std::chrono::steady_clock::now();
+                mans::decompress(comp_buf.data(),
+                                 comp_buf.size(),
+                                 params,
+                                 chunk_raw.data(),
+                                 out_size);
+                auto t3 = std::chrono::steady_clock::now();
+                local.comp_s += std::chrono::duration<double>(t3 - t2).count();
+                if (out_size != entry.raw_len) {
+                    throw std::runtime_error("Decompressed size mismatch");
+                }
+                std::memcpy(raw_buf.data() + rank_offset_bytes,
+                            chunk_raw.data() + chunk_offset,
+                            copy_len);
+            }
+
+            chunk_raw_start = chunk_raw_end;
+        }
+
+        auto t4 = std::chrono::steady_clock::now();
+        write_fully(out_fd,
+                    raw_buf.data(),
+                    raw_buf.size(),
+                    static_cast<std::uint64_t>(rank_offset) * elem_size);
+        auto t5 = std::chrono::steady_clock::now();
+        local.io_write_s += std::chrono::duration<double>(t5 - t4).count();
+
+        close(in_fd);
+        close(out_fd);
+    }
+
+    Metrics agg = local;
+    auto reduce_max = [&](double v) {
+        double out = 0.0;
+        MPI_Reduce(&v, &out, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+        return out;
+    };
+    auto reduce_sum_u64 = [&](std::uint64_t v) {
+        std::uint64_t out = 0;
+        MPI_Reduce(&v, &out, 1, MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
+        return out;
+    };
+    auto reduce_max_u64 = [&](std::uint64_t v) {
+        std::uint64_t out = 0;
+        MPI_Reduce(&v, &out, 1, MPI_UINT64_T, MPI_MAX, 0, MPI_COMM_WORLD);
+        return out;
+    };
+
+    agg.io_read_s = reduce_max(local.io_read_s);
+    agg.comp_s = reduce_max(local.comp_s);
+    agg.io_write_s = reduce_max(local.io_write_s);
+    agg.raw_bytes = reduce_sum_u64(local.raw_bytes);
+    agg.comp_bytes = reduce_sum_u64(local.comp_bytes);
+    const std::uint64_t max_raw_bytes = reduce_max_u64(local.raw_bytes);
+
+    if (mpi.rank == 0) {
+        const double raw_mb = static_cast<double>(agg.raw_bytes) / 1048576.0;
+        const double comp_mb = static_cast<double>(agg.comp_bytes) / 1048576.0;
+        const double local_raw_mb = static_cast<double>(max_raw_bytes) / 1048576.0;
+        const double read_thr = agg.io_read_s > 0.0 ? comp_mb / agg.io_read_s : 0.0;
+        const double decomp_thr = agg.comp_s > 0.0 ? raw_mb / agg.comp_s : 0.0;
+        const double write_thr = agg.io_write_s > 0.0 ? raw_mb / agg.io_write_s : 0.0;
+        const double decomp_write_s = agg.comp_s + agg.io_write_s;
+        const double decomp_write_thr = decomp_write_s > 0.0 ? raw_mb / decomp_write_s : 0.0;
+        const double read_thr_local = agg.io_read_s > 0.0 ? (comp_mb / mpi.ranks) / agg.io_read_s : 0.0;
+        const double decomp_thr_local = agg.comp_s > 0.0 ? local_raw_mb / agg.comp_s : 0.0;
+        const double write_thr_local = agg.io_write_s > 0.0 ? local_raw_mb / agg.io_write_s : 0.0;
+        const double decomp_write_thr_local =
+            decomp_write_s > 0.0 ? local_raw_mb / decomp_write_s : 0.0;
+        const double ratio = agg.raw_bytes > 0 ? static_cast<double>(agg.comp_bytes) / agg.raw_bytes : 0.0;
+
+        const std::string dtype_str = (params.dtype == mans::DataType::U16) ? "u2" : "u4";
+        std::cout << kAnsiBold << "Mans mpi bench finished!" << kAnsiReset
+                  << " Output: " << opts.output_bin << "\n";
+        std::cout << kAnsiDim << "Config: " << kAnsiReset
+                  << "mode=" << mode_to_string(opts.mode)
+                  << ", dtype=" << dtype_str
+                  << ", format=container"
+                  << ", filter=" << (opts.filter == FilterId::Mans ? "mans" : "none")
+                  << ", chunk_count=" << header.chunk_count
+                  << ", ranks=" << mpi.ranks
+                  << "\n";
+        std::cout << kAnsiBold << "Decompress" << kAnsiReset << "\n";
+        std::cout << "  " << kAnsiBlue << "IO read s" << kAnsiReset << ": "
+                  << agg.io_read_s << " (" << read_thr << " MB/s)\n";
+        std::cout << "  " << kAnsiBlue << "Decompress s" << kAnsiReset << ": "
+                  << agg.comp_s << " (" << decomp_thr << " MB/s)\n";
+        std::cout << "  " << kAnsiBlue << "IO write s" << kAnsiReset << ": "
+                  << agg.io_write_s << " (" << write_thr << " MB/s)\n";
+        std::cout << "  " << kAnsiBlue << "Decomp+IO write s" << kAnsiReset << ": "
+                  << decomp_write_s << " (" << decomp_write_thr << " MB/s)\n";
+        std::cout << "  Throughput (MB/s, decomp only): "
+                  << kAnsiGreen << decomp_thr << kAnsiReset << "\n";
+        std::cout << "  " << kAnsiYellow << "IO ratio" << kAnsiReset << ": "
+                  << (agg.io_read_s + agg.io_write_s + agg.comp_s > 0.0
+                          ? (agg.io_read_s + agg.io_write_s) /
+                                (agg.io_read_s + agg.io_write_s + agg.comp_s)
+                          : 0.0)
+                  << "\n";
+        std::cout << "  " << kAnsiYellow << "Ratio" << kAnsiReset << ": "
+                  << ratio << "\n";
+        std::cout << kAnsiDim << "  Local max (MB/s): read=" << read_thr_local
+                  << ", decomp=" << decomp_thr_local
+                  << ", write=" << write_thr_local
+                  << ", decomp+write=" << decomp_write_thr_local
+                  << kAnsiReset << "\n";
+
+        const std::string csv_path = opts.metrics_csv.empty()
+            ? (opts.input_bin + ".mpi_metrics.csv")
+            : opts.metrics_csv;
+        append_metrics_csv(csv_path, opts, total_elems, elem_size, mpi.ranks, agg);
+        std::cout << "  metrics_csv:    " << csv_path << "\n";
+    }
+
+    return 0;
 }
 
 } // namespace
@@ -459,6 +860,10 @@ int main(int argc, char** argv) {
     if (opts.expected_ranks > 0 && opts.expected_ranks != mpi.ranks && mpi.rank == 0) {
         std::cerr << "[WARN] --ranks " << opts.expected_ranks
                   << " does not match MPI world size " << mpi.ranks << ". Using MPI size.\n";
+    }
+
+    if (opts.mode == BenchMode::Decompress) {
+        return run_decompress_mode(mpi, opts);
     }
 
     std::optional<mans::h5::MansConfig> mans_cfg;
@@ -569,6 +974,7 @@ int main(int argc, char** argv) {
         std::cout << "  " << kAnsiCyan << "OMP max threads" << kAnsiReset << ": "
                   << omp_get_max_threads() << "\n";
         std::cout << kAnsiBold << "Command-line arguments:" << kAnsiReset << "\n";
+        std::cout << "  " << kAnsiCyan << "Mode" << kAnsiReset << ": " << mode_to_string(opts.mode) << "\n";
         std::cout << "  " << kAnsiCyan << "Input type" << kAnsiReset << ": " << dtype_str << "\n";
         std::cout << "  " << kAnsiCyan << "Input file" << kAnsiReset << ": "
                   << (opts.input_bin.empty() ? "(generated)" : opts.input_bin) << "\n";
@@ -746,34 +1152,36 @@ int main(int argc, char** argv) {
         MANS_TIMING_RUN_SCOPE();
         MANS_TIMING_SCOPE("total");
         if (mpi.rank == 0) {
-            std::cout << "\r" << kAnsiDim << "[Compress] iter "
+            const char* label = (opts.mode == BenchMode::Bench) ? "[Bench]" : "[Compress]";
+            std::cout << "\r" << kAnsiDim << label << " iter "
                       << (iter + 1) << "/" << kIters << kAnsiReset << std::flush;
         }
 
-        std::vector<std::vector<std::uint8_t>> payloads;
-        std::vector<std::uint64_t> local_comp_lens;
-        std::vector<std::uint64_t> local_raw_lens;
+        const std::size_t num_chunks = chunks.size();
+        std::unique_ptr<std::uint64_t[]> local_comp_lens;
+        std::unique_ptr<std::uint64_t[]> local_raw_lens;
+        std::unique_ptr<PayloadBlock[]> payloads;
         std::uint64_t local_payload_bytes = 0;
         std::uint64_t local_block_bytes = 0;
         double local_comp_s = 0.0;
         double local_io_write_s = 0.0;
 
         if (rank_count > 0 && use_container) {
-            payloads.reserve(chunks.size());
-            local_comp_lens.reserve(chunks.size());
-            local_raw_lens.reserve(chunks.size());
+            if (num_chunks > 0) {
+                local_comp_lens = std::make_unique<std::uint64_t[]>(num_chunks);
+                local_raw_lens = std::make_unique<std::uint64_t[]>(num_chunks);
+                if (opts.filter == FilterId::Mans) {
+                    payloads = std::make_unique<PayloadBlock[]>(num_chunks);
+                }
+            }
 
             auto t2 = std::chrono::steady_clock::now();
-            for (const auto& chunk : chunks) {
+            for (std::size_t i = 0; i < num_chunks; ++i) {
+                const auto& chunk = chunks[i];
                 const std::size_t raw_bytes = chunk.len * elem_size_final;
                 if (opts.filter == FilterId::None) {
-                    std::vector<std::uint8_t> payload(raw_bytes);
-                    std::memcpy(payload.data(),
-                                raw_bytes_buf.data() + chunk.offset * elem_size_final,
-                                raw_bytes);
-                    payloads.emplace_back(std::move(payload));
-                    local_comp_lens.push_back(static_cast<std::uint64_t>(raw_bytes));
-                    local_raw_lens.push_back(static_cast<std::uint64_t>(raw_bytes));
+                    local_comp_lens[i] = static_cast<std::uint64_t>(raw_bytes);
+                    local_raw_lens[i] = static_cast<std::uint64_t>(raw_bytes);
                     local_payload_bytes += raw_bytes;
                     local_block_bytes += sizeof(mans::container::ChunkHeader) + raw_bytes;
                     continue;
@@ -781,14 +1189,17 @@ int main(int argc, char** argv) {
 
                 const std::size_t max_out_size =
                     mans::get_mans_max_compress_bytes_p(chunk.len, params);
-                std::vector<std::uint8_t> payload(max_out_size);
-                std::size_t out_size = payload.size();
+                auto* payload_buf = static_cast<std::uint8_t*>(std::malloc(max_out_size));
+                if (!payload_buf) {
+                    throw std::runtime_error("Failed to allocate payload buffer");
+                }
+                std::size_t out_size = max_out_size;
                 if (dtype == mans::DataType::U16) {
                     const auto* ptr = reinterpret_cast<const std::uint16_t*>(raw_bytes_buf.data());
                     mans::cpu::compress_internal(ptr + chunk.offset,
                                                  chunk.len,
                                                  params,
-                                                 payload.data(),
+                                                 payload_buf,
                                                  out_size,
                                                  false,
                                                  "");
@@ -797,18 +1208,19 @@ int main(int argc, char** argv) {
                     mans::cpu::compress_internal(ptr + chunk.offset,
                                                  chunk.len,
                                                  params,
-                                                 payload.data(),
+                                                 payload_buf,
                                                  out_size,
                                                  false,
                                                  "");
                 }
                 if (out_size == 0) {
+                    std::free(payload_buf);
                     throw std::runtime_error("Compression failed for chunk");
                 }
-                payload.resize(out_size);
-                payloads.emplace_back(std::move(payload));
-                local_comp_lens.push_back(static_cast<std::uint64_t>(out_size));
-                local_raw_lens.push_back(static_cast<std::uint64_t>(raw_bytes));
+                payloads[i].data.reset(payload_buf);
+                payloads[i].size = out_size;
+                local_comp_lens[i] = static_cast<std::uint64_t>(out_size);
+                local_raw_lens[i] = static_cast<std::uint64_t>(raw_bytes);
                 local_payload_bytes += out_size;
                 local_block_bytes += sizeof(mans::container::ChunkHeader) + out_size;
             }
@@ -827,36 +1239,42 @@ int main(int argc, char** argv) {
             }
         }
 
-        std::vector<std::uint64_t> all_comp_lens;
-        std::vector<std::uint64_t> all_raw_lens;
+        std::unique_ptr<std::uint64_t[]> all_comp_lens;
+        std::unique_ptr<std::uint64_t[]> all_raw_lens;
         std::uint64_t total_block_bytes = 0;
         if (use_container) {
             total_block_bytes = reduce_sum_u64(local_block_bytes);
             if (mpi.rank == 0) {
-                all_comp_lens.resize(static_cast<std::size_t>(total_chunks));
-                all_raw_lens.resize(static_cast<std::size_t>(total_chunks));
+                const std::size_t total_chunks_size = static_cast<std::size_t>(total_chunks);
+                if (total_chunks_size > 0) {
+                    all_comp_lens = std::make_unique<std::uint64_t[]>(total_chunks_size);
+                    all_raw_lens = std::make_unique<std::uint64_t[]>(total_chunks_size);
+                }
             }
-            MPI_Gatherv(local_comp_lens.data(),
-                        static_cast<int>(local_comp_lens.size()),
+            MPI_Gatherv(local_comp_lens.get(),
+                        static_cast<int>(num_chunks),
                         MPI_UINT64_T,
-                        all_comp_lens.data(),
+                        all_comp_lens.get(),
                         recv_counts.data(),
                         recv_displs.data(),
                         MPI_UINT64_T,
                         0,
                         MPI_COMM_WORLD);
-            MPI_Gatherv(local_raw_lens.data(),
-                        static_cast<int>(local_raw_lens.size()),
+            MPI_Gatherv(local_raw_lens.get(),
+                        static_cast<int>(num_chunks),
                         MPI_UINT64_T,
-                        all_raw_lens.data(),
+                        all_raw_lens.get(),
                         recv_counts.data(),
                         recv_displs.data(),
                         MPI_UINT64_T,
                         0,
                         MPI_COMM_WORLD);
             if (mpi.rank == 0) {
-                std::vector<mans::container::IndexEntry> index;
-                index.resize(static_cast<std::size_t>(total_chunks));
+                std::unique_ptr<mans::container::IndexEntry[]> index;
+                const std::size_t total_chunks_size = static_cast<std::size_t>(total_chunks);
+                if (total_chunks_size > 0) {
+                    index = std::make_unique<mans::container::IndexEntry[]>(total_chunks_size);
+                }
                 std::uint64_t offset = base_header.data_offset;
                 for (std::uint64_t i = 0; i < total_chunks; ++i) {
                     mans::container::IndexEntry entry{};
@@ -881,8 +1299,8 @@ int main(int argc, char** argv) {
                 }
                 write_fully(fd, &base_header, sizeof(base_header), 0);
                 write_fully(fd,
-                            index.data(),
-                            index.size() * sizeof(mans::container::IndexEntry),
+                            index.get(),
+                            total_chunks_size * sizeof(mans::container::IndexEntry),
                             static_cast<std::uint64_t>(base_header.index_offset));
                 if (ftruncate(fd, static_cast<off_t>(file_bytes)) != 0) {
                     std::cerr << "[WARN] Failed to ftruncate output file.\n";
@@ -916,7 +1334,7 @@ int main(int argc, char** argv) {
             if (use_container) {
                 std::uint64_t write_offset = base_header.data_offset + prefix_block_bytes;
                 std::uint64_t chunk_index = prefix_chunks;
-                for (std::size_t i = 0; i < payloads.size(); ++i) {
+                for (std::size_t i = 0; i < num_chunks; ++i) {
                     mans::container::ChunkHeader chunk_header{};
                     std::memcpy(chunk_header.magic, mans::container::kChunkMagic,
                                 sizeof(mans::container::kChunkMagic));
@@ -928,8 +1346,18 @@ int main(int argc, char** argv) {
 
                     write_fully(fd, &chunk_header, sizeof(chunk_header), write_offset);
                     write_offset += sizeof(chunk_header);
-                    write_fully(fd, payloads[i].data(), payloads[i].size(), write_offset);
-                    write_offset += payloads[i].size();
+                    if (opts.filter == FilterId::None) {
+                        const std::size_t raw_offset = chunks[i].offset * elem_size_final;
+                        const std::size_t raw_size = chunks[i].len * elem_size_final;
+                        write_fully(fd,
+                                    raw_bytes_buf.data() + raw_offset,
+                                    raw_size,
+                                    write_offset);
+                        write_offset += raw_size;
+                    } else {
+                        write_fully(fd, payloads[i].data.get(), payloads[i].size, write_offset);
+                        write_offset += payloads[i].size;
+                    }
                 }
             } else {
                 write_fully(fd,
@@ -987,7 +1415,8 @@ int main(int argc, char** argv) {
         std::cout << kAnsiBold << "Mans mpi bench finished!" << kAnsiReset
                   << " Output: " << opts.output_bin << "\n";
         std::cout << kAnsiDim << "Config: " << kAnsiReset
-                  << "dtype=" << dtype_str
+                  << "mode=" << mode_to_string(opts.mode)
+                  << ", dtype=" << dtype_str
                   << ", format=" << (use_container ? "container" : "raw")
                   << ", filter=" << (opts.filter == FilterId::Mans ? "mans" : "none")
                   << ", chunk_mb=" << opts.chunk_mb

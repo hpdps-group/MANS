@@ -109,26 +109,15 @@ if(BUILD_CPU)
 
   # ========== MANS ==========
 
-  # mans compress：build/cpu/cpu_mans_compress
-  add_executable(cpu_mans_compress 
-    cpu/cpu_mans_compress.cpp
+  # mans bench：build/cpu/cpu_mans_bench
+  add_executable(cpu_mans_bench
+    cpu/cpu_mans_bench.cpp
   )
-  set_target_properties(cpu_mans_compress PROPERTIES
+  set_target_properties(cpu_mans_bench PROPERTIES
       RUNTIME_OUTPUT_DIRECTORY ${cpu_root_binary_dir}
   )
-  target_compile_options(cpu_mans_compress PRIVATE $<$<CONFIG:Release>:-O3>)
-  # link mans cpu core library
-  target_link_libraries(cpu_mans_compress PRIVATE mans_common OpenMP::OpenMP_CXX)
-
-  # mans decompress：build/cpu/cpu_mans_decompress
-  add_executable(cpu_mans_decompress
-   cpu/cpu_mans_decompress.cpp
-   )
-  set_target_properties(cpu_mans_decompress PROPERTIES
-      RUNTIME_OUTPUT_DIRECTORY ${cpu_root_binary_dir}
-  )
-  target_compile_options(cpu_mans_decompress PRIVATE $<$<CONFIG:Release>:-O3>)
-  target_link_libraries(cpu_mans_decompress PRIVATE mans_cpu_core OpenMP::OpenMP_CXX)
+  target_compile_options(cpu_mans_bench PRIVATE $<$<CONFIG:Release>:-O3>)
+  target_link_libraries(cpu_mans_bench PRIVATE mans_cpu_core OpenMP::OpenMP_CXX)
 
   # ========== MPI Benchmarks ==========
   find_package(MPI REQUIRED)
@@ -144,19 +133,6 @@ if(BUILD_CPU)
       ${CMAKE_SOURCE_DIR}/tools/H5Z-MANS/include
   )
   target_link_libraries(cpu_mans_mpi_bench PRIVATE mans_common MPI::MPI_CXX OpenMP::OpenMP_CXX)
-
-  add_executable(cpu_mans_mpi_decompress
-    cpu/cpu_mans_mpi_decompress.cpp
-  )
-  set_target_properties(cpu_mans_mpi_decompress PROPERTIES
-      RUNTIME_OUTPUT_DIRECTORY ${cpu_root_binary_dir}
-  )
-  target_compile_options(cpu_mans_mpi_decompress PRIVATE $<$<CONFIG:Release>:-O3>)
-  target_include_directories(cpu_mans_mpi_decompress PRIVATE
-      ${CMAKE_SOURCE_DIR}
-      ${CMAKE_SOURCE_DIR}/tools/H5Z-MANS/include
-  )
-  target_link_libraries(cpu_mans_mpi_decompress PRIVATE mans_common MPI::MPI_CXX OpenMP::OpenMP_CXX)
 
   # ========== CPU / pans submodule ==========
   set(cpu_pans_binary_dir ${cpu_root_binary_dir}/pans)
