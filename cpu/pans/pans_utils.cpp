@@ -57,16 +57,16 @@ void pans_compress(
         headerOut = (ANSCoalescedHeader*)encPtrs;
         table = (uint4*)malloc(sizeof(uint4) * kNumSymbols);
         tempHistogram = (uint32_t*)malloc(sizeof(uint32_t) * kNumSymbols);
-        compressedBlocks_host = (uint8_t*)std::aligned_alloc(
+        compressedBlocks_host = (uint8_t*)aligned_alloc(
             kBlockAlignment,
             sizeof(uint8_t) * maxNumCompressedBlocks * uncoalescedBlockStride);
-        compressedWords_host = (uint32_t*)std::aligned_alloc(
+        compressedWords_host = (uint32_t*)aligned_alloc(
             kBlockAlignment,
             sizeof(uint32_t) * maxNumCompressedBlocks);
-        compressedWords_host_prefix = (uint32_t*)std::aligned_alloc(
+        compressedWords_host_prefix = (uint32_t*)aligned_alloc(
             kBlockAlignment,
             sizeof(uint32_t) * maxNumCompressedBlocks);
-        compressedWordsPrefix_host = (uint32_t*)std::aligned_alloc(
+        compressedWordsPrefix_host = (uint32_t*)aligned_alloc(
             kBlockAlignment,
             sizeof(uint32_t) * maxNumCompressedBlocks);
     }
@@ -311,13 +311,13 @@ void pans_decompress(
             decPtrs = (uint8_t*)malloc(sizeof(uint8_t) * batchSize);
             owns_dec_buffer = true;
         }
-        symbol = (uint32_t*)std::aligned_alloc(
+        symbol = (uint32_t*)aligned_alloc(
             kBlockAlignment,
             sizeof(uint32_t) * (1u << precision));
-        pdf = (uint32_t*)std::aligned_alloc(
+        pdf = (uint32_t*)aligned_alloc(
             kBlockAlignment,
             sizeof(uint32_t) * (1u << precision));
-        cdf = (uint32_t*)std::aligned_alloc(
+        cdf = (uint32_t*)aligned_alloc(
             kBlockAlignment,
             sizeof(uint32_t) * (1u << precision));
     }
