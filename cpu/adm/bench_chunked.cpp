@@ -1,13 +1,16 @@
 #include "adm_utils.h"
 #include "adm.h"
+#include "../mans_cpu.h"
 #include "../file_utils.h"
 #include "../../mans_defs.h"
+#include "../../mans_timing.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -84,6 +87,17 @@ void apply_thread_overrides(mans::MansParams& params, const std::vector<int>& th
     params.adm_decode_values_threads = threads[7];
 }
 
+void apply_auto_thread_config(mans::MansParams& params, const mans::cpu::CsvThreadConfig& cfg) {
+    params.adm_decide_threads = cfg.adm_decide_threads;
+    params.adm_center_calc_threads = cfg.compress_threads;
+    params.adm_encode_threads = cfg.compress_threads;
+    params.adm_warp_reduce_threads = cfg.compress_threads;
+    params.adm_fill_tail_threads = cfg.compress_threads;
+    params.adm_write_back_threads = cfg.compress_threads;
+    params.adm_restore_signals_threads = cfg.decompress_threads;
+    params.adm_decode_values_threads = cfg.decompress_threads;
+}
+
 std::string format_chunk_label(std::size_t bytes) {
     const std::size_t kib = 1024;
     const std::size_t mib = 1024 * 1024;
@@ -123,6 +137,8 @@ RunStats run_once(const std::vector<T>& input,
     std::vector<std::size_t> comp_offsets(chunks.size(), 0);
 
     std::size_t offset = 0;
+    {
+        MANS_TIMING_SCOPE("adm/compress_total");
     auto comp_start = std::chrono::high_resolution_clock::now();
     for (std::size_t i = 0; i < chunks.size(); ++i) {
         const auto& chunk = chunks[i];
@@ -138,7 +154,10 @@ RunStats run_once(const std::vector<T>& input,
     stats.comp_ms =
         std::chrono::duration<double, std::milli>(comp_end - comp_start).count();
     stats.comp_bytes = offset;
+    }
 
+    {
+        MANS_TIMING_SCOPE("adm/decompress_total");
     auto decomp_start = std::chrono::high_resolution_clock::now();
     for (std::size_t i = 0; i < chunks.size(); ++i) {
         const auto& chunk = chunks[i];
@@ -156,6 +175,7 @@ RunStats run_once(const std::vector<T>& input,
     auto decomp_end = std::chrono::high_resolution_clock::now();
     stats.decomp_ms =
         std::chrono::duration<double, std::milli>(decomp_end - decomp_start).count();
+    }
 
     return stats;
 }
@@ -179,7 +199,10 @@ template <typename T>
 int run_bench_for_type(const std::vector<T>& input,
                        const std::vector<double>& chunks_mb,
                        mans::MansParams& params,
-                       std::ofstream* csv) {
+                       std::ofstream* csv,
+                       const std::string& timing_csv_base,
+                       bool timing_per_chunk,
+                       const std::vector<mans::cpu::CsvThreadConfig>* auto_threads) {
     if (input.empty()) {
         std::cerr << "Input file is empty.\n";
         return 1;
@@ -187,7 +210,7 @@ int run_bench_for_type(const std::vector<T>& input,
 
     const std::size_t total_elements = input.size();
     const std::size_t total_bytes = total_elements * sizeof(T);
-    std::cout << "Input bytes: " << total_bytes << "\n";
+    (void)total_bytes;
 
     for (double chunk_mb : chunks_mb) {
         if (chunk_mb <= 0.0) {
@@ -200,11 +223,28 @@ int run_bench_for_type(const std::vector<T>& input,
         if (chunk_elements == 0) {
             chunk_elements = 1;
         }
+        if (auto_threads && !auto_threads->empty()) {
+            mans::cpu::CsvThreadConfig chosen{};
+            if (mans::cpu::find_nearest_threads(*auto_threads, chunk_elements, chosen)) {
+                apply_auto_thread_config(params, chosen);
+            } else {
+                std::cerr << "No matching thread config found for chunk elements: "
+                          << chunk_elements << "\n";
+            }
+        }
 
         std::size_t chunk_bytes = chunk_elements * sizeof(T);
         std::string label = format_chunk_label(chunk_bytes);
-        std::cout << "[RUN] Chunk " << label << " (" << chunk_bytes << " bytes)\n"
-                  << std::flush;
+        // Silence per-chunk run banner to keep output clean.
+        std::string timing_path;
+        if (!timing_csv_base.empty()) {
+            if (timing_per_chunk) {
+                timing_path = timing_csv_base + "." + label + ".timing.csv";
+            } else {
+                timing_path = timing_csv_base;
+            }
+            // std::cout << "  Timing CSV: " << timing_path << "\n";
+        }
 
         std::vector<ChunkInfo> chunks = build_chunks<T>(total_elements, chunk_elements);
         std::size_t max_chunk_len = 0;
@@ -222,7 +262,9 @@ int run_bench_for_type(const std::vector<T>& input,
         double total_decomp_ms = 0.0;
         double total_comp_bytes = 0.0;
 
+        MANS_TIMING_RESET();
         for (int iter = 0; iter < kIters; ++iter) {
+            MANS_TIMING_RUN_SCOPE();
             RunStats stats = run_once<T>(input, chunks, compressed_blob, recovered,
                                          params);
             if (!stats.ok) {
@@ -259,6 +301,10 @@ int run_bench_for_type(const std::vector<T>& input,
                   << " | " << std::setw(13) << std::fixed << std::setprecision(1)
                   << decomp_mbps
                   << "\n";
+
+        if (!timing_path.empty()) {
+        MANS_TIMING_DUMP(timing_path);
+    }
 
         if (csv && *csv) {
             (*csv) << label << ","
@@ -310,6 +356,9 @@ int main(int argc, char** argv) {
     }
     if (!csv_path.empty()) {
         std::cout << "  CSV output: " << csv_path << "\n";
+        std::cout << "  Timing CSV: " << csv_path << ".<chunk>.timing.csv\n";
+    } else {
+        std::cout << "  Timing CSV: timing.csv\n";
     }
     std::cout << "\n";
     
@@ -344,6 +393,8 @@ int main(int argc, char** argv) {
     std::cout << "Chunks (MB): " << chunks_arg << "\n\n";
 
     std::ofstream csv;
+    std::string timing_csv_base = "timing.csv";
+    bool timing_per_chunk = false;
     if (!csv_path.empty()) {
         csv.open(csv_path);
         if (!csv) {
@@ -351,6 +402,8 @@ int main(int argc, char** argv) {
             return 1;
         }
         csv << "chunk_label,chunk_bytes,ratio_pct,comp_mbps,decomp_mbps\n";
+        timing_csv_base = csv_path;
+        timing_per_chunk = true;
     }
 
     std::cout << std::left << std::setw(8) << "Chunk"
@@ -372,7 +425,23 @@ int main(int argc, char** argv) {
         if (has_threads) {
             apply_thread_overrides(params, thread_list);
         }
-        return run_bench_for_type<std::uint16_t>(input, chunks_mb, params, &csv);
+        const char* csv_env = std::getenv("MANS_THREAD_CSV");
+        std::string auto_thread_csv =
+            (csv_env && csv_env[0] != '\0') ? csv_env : "best_threads.csv";
+        std::vector<mans::cpu::CsvThreadConfig> auto_thread_configs;
+        bool use_auto_threads = false;
+        if (!has_threads) {
+            std::string error;
+            if (!mans::cpu::load_thread_csv(auto_thread_csv, auto_thread_configs, error)) {
+                std::cerr << "Auto thread config disabled: " << error << "\n";
+            } else {
+                use_auto_threads = true;
+            }
+        }
+        return run_bench_for_type<std::uint16_t>(input, chunks_mb, params, &csv,
+                                                 timing_csv_base, timing_per_chunk,
+                                                 use_auto_threads ? &auto_thread_configs
+                                                                  : nullptr);
     } else {
         std::vector<std::uint32_t> input;
         if (!load_u32_file(input_path, input)) {
@@ -385,6 +454,22 @@ int main(int argc, char** argv) {
         if (has_threads) {
             apply_thread_overrides(params, thread_list);
         }
-        return run_bench_for_type<std::uint32_t>(input, chunks_mb, params, &csv);
+        const char* csv_env = std::getenv("MANS_THREAD_CSV");
+        std::string auto_thread_csv =
+            (csv_env && csv_env[0] != '\0') ? csv_env : "best_threads.csv";
+        std::vector<mans::cpu::CsvThreadConfig> auto_thread_configs;
+        bool use_auto_threads = false;
+        if (!has_threads) {
+            std::string error;
+            if (!mans::cpu::load_thread_csv(auto_thread_csv, auto_thread_configs, error)) {
+                std::cerr << "Auto thread config disabled: " << error << "\n";
+            } else {
+                use_auto_threads = true;
+            }
+        }
+        return run_bench_for_type<std::uint32_t>(input, chunks_mb, params, &csv,
+                                                 timing_csv_base, timing_per_chunk,
+                                                 use_auto_threads ? &auto_thread_configs
+                                                                  : nullptr);
     }
 }

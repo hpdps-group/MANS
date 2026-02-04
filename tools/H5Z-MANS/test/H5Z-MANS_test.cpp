@@ -4,34 +4,28 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <iomanip>
+#include <cstring>
 #include <iostream>
-#include <limits>
-#include <map>
-#include <numeric>
-#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <hdf5.h>
 
-#include "H5Z-MANS_config.h"
-#include "mans_timing.h"
 #include "mans_data_gen.h"
+#include "H5Z-MANS_config.h"
+#include "cpu/mans_cpu.h"
+#include "mans_timing.h"
 #include "../include/sz3_config_min.h"
 
 #if defined(H5_HAVE_PARALLEL)
 #include <mpi.h>
 #endif
-
-// ==========================================
-// 1. Constants & Definitions
-// ==========================================
 
 // Filter IDs
 #define FILTER_ID_NONE    0
@@ -40,156 +34,51 @@
 #define FILTER_ID_MANS    32001
 #define FILTER_ID_SZ3     32024
 
-// Synthetic defaults (kept aligned with previous hard-coded values)
-static constexpr double DEFAULT_DATA_SIZE_MB = 256.0;
-static constexpr double DEFAULT_CHUNK_MB = 32.0;
+static constexpr double DEFAULT_DATASET_MB = 1024.0; // 1GB
+static constexpr double DEFAULT_CHUNK_MB = 8.0;
+static constexpr const char* DEFAULT_OUTPUT_H5 = "hdf5_bench.h5";
+static constexpr const char* TIMING_CSV_PATH = "hdf5_timing.csv";
 
-// Color Definitions
+static constexpr std::uint32_t DEFAULT_ADM_THRESHOLD = 4000U;
+
 static const std::string RST  = "\033[0m";
-static const std::string RED  = "\033[1;31m";
 static const std::string GRN  = "\033[1;32m";
 static const std::string YLW  = "\033[1;33m";
-static const std::string BLU  = "\033[1;36m";
+static const std::string RED  = "\033[1;31m";
 static const std::string BOLD = "\033[1m";
 
-// ==========================================
-// 2. Runtime Configuration Structs
-// ==========================================
-
-enum class Mode {
-    Compress,
-    Decompress,
-};
-
-struct RunOptions {
-    std::string input_bin;
-    std::string output_h5;
-
-    double chunk_mb = DEFAULT_CHUNK_MB;
-    int filter_id = FILTER_ID_MANS;
-    Mode mode = Mode::Compress;
-
-    // Optional: validate against provided rank count.
-    int expected_ranks = -1;
-
-    // Synthetic data config (used only when input_bin is empty).
-    mans::h5::data_gen::SyntheticConfig synth_cfg{};
-
-    // Optional: point to a dataset generator config file.
-    std::string dataset_config_file;
-
-    // MANS config is only required when filter==MANS.
-    std::string mans_config_file;
-
-    // Output metrics CSV. If empty, we derive from output_h5.
-    std::string metrics_csv;
-};
-
-struct Metrics {
-    double raw_io_s = 0.0;        // compress: raw read; decompress: raw write
-    double h5_io_s = 0.0;         // compress: H5Dwrite; decompress: H5Dread
-    std::uint64_t raw_bytes = 0;  // raw byte count processed by this rank
-};
-
-// ==========================================
-// 3. Helper Functions
-// ==========================================
-
-#define CHECK_H5(func_call)                                                            \
-    do {                                                                               \
-        if ((func_call) < 0) {                                                         \
-            std::cerr << RED << "[Error] HDF5 call failed at line " << __LINE__       \
-                      << ": " #func_call << RST << "\n";                           \
-            std::exit(1);                                                              \
-        }                                                                              \
+#define CHECK_H5(call)                                                              \
+    do {                                                                            \
+        if ((call) < 0) {                                                           \
+            std::cerr << RED << "[HDF5 Error] " << #call << RST << "\n";           \
+            std::exit(1);                                                           \
+        }                                                                           \
     } while (0)
 
-namespace fs = std::filesystem;
+enum class FilterKind {
+    Mans,
+    Zstd,
+    Sz3,
+    Gzip,
+    None,
+};
 
-static std::string mode_to_string(Mode mode) {
-    return mode == Mode::Compress ? "compress" : "decompress";
-}
+struct Options {
+    double dataset_mb = DEFAULT_DATASET_MB;
+    double chunk_mb = DEFAULT_CHUNK_MB;
+    std::string output_h5 = DEFAULT_OUTPUT_H5;
+    FilterKind filter = FilterKind::Mans;
+    std::vector<int> threads = {32, 32, 32, 32, 32, 32, 32, 32};
+    bool threads_from_user = false;
+};
 
-static std::string filter_to_string(int filter_id) {
-    switch (filter_id) {
-        case FILTER_ID_NONE:
-            return "none";
-        case FILTER_ID_DEFLATE:
-            return "gzip";
-        case FILTER_ID_ZSTD:
-            return "zstd";
-        case FILTER_ID_MANS:
-            return "mans";
-        case FILTER_ID_SZ3:
-            return "sz3";
-        default:
-            return std::to_string(filter_id);
-    }
-}
-
-static std::size_t safe_chunk_elems(double chunk_mb, std::size_t elem_size, std::size_t total_elems) {
-    const auto chunk_bytes = static_cast<std::size_t>(chunk_mb * 1024.0 * 1024.0);
-    std::size_t chunk_elems = elem_size == 0 ? 0 : (chunk_bytes / elem_size);
-    if (chunk_elems == 0) {
-        chunk_elems = 1;
-    }
-    if (total_elems > 0) {
-        chunk_elems = std::min<std::size_t>(chunk_elems, total_elems);
-    }
-    return chunk_elems;
-}
-
-static void split_even(std::size_t total, int rank, int ranks, std::size_t& offset, std::size_t& count) {
-    const std::size_t base = total / static_cast<std::size_t>(ranks);
-    const std::size_t rem = total % static_cast<std::size_t>(ranks);
-    if (static_cast<std::size_t>(rank) < rem) {
-        count = base + 1;
-        offset = static_cast<std::size_t>(rank) * count;
-    } else {
-        count = base;
-        offset = rem * (base + 1) + (static_cast<std::size_t>(rank) - rem) * base;
-    }
-}
-
-static double seconds_since(const std::chrono::steady_clock::time_point& t0,
-                            const std::chrono::steady_clock::time_point& t1) {
-    return std::chrono::duration<double>(t1 - t0).count();
-}
-
-static void append_metrics_csv(const std::string& csv_path,
-                               const RunOptions& opts,
-                               std::size_t total_elems,
-                               std::size_t elem_size,
-                               int ranks,
-                               const Metrics& agg,
-                               double raw_thr_mb_s,
-                               double h5_thr_mb_s) {
-    const bool exists = fs::exists(csv_path);
-    std::ofstream out(csv_path, std::ios::app);
-    if (!out.is_open()) {
-        std::cerr << YLW << "[WARN] Failed to open metrics CSV: " << csv_path << RST << "\n";
-        return;
-    }
-
-    if (!exists) {
-        out << "mode,filter,chunk_mb,ranks,total_elems,elem_size_bytes,raw_bytes,"
-               "raw_io_s,raw_thr_mb_s,h5_io_s,h5_thr_mb_s\n";
-    }
-
-    out << mode_to_string(opts.mode) << ","
-        << filter_to_string(opts.filter_id) << ","
-        << opts.chunk_mb << ","
-        << ranks << ","
-        << total_elems << ","
-        << elem_size << ","
-        << agg.raw_bytes << ","
-        << std::fixed << std::setprecision(6)
-        << agg.raw_io_s << ","
-        << raw_thr_mb_s << ","
-        << agg.h5_io_s << ","
-        << h5_thr_mb_s
-        << "\n";
-}
+struct TimingSums {
+    double global_write_s = 0.0;
+    double global_read_s = 0.0;
+    double avg_write_s = 0.0;
+    double avg_read_s = 0.0;
+    double ratio = 0.0;
+};
 
 #if defined(H5_HAVE_PARALLEL)
 struct MpiContext {
@@ -220,694 +109,84 @@ struct MpiContext {
 struct MpiContext {
     int rank = 0;
     int ranks = 1;
-    bool initialized = false;
 
     MpiContext(int&, char**&) {}
 };
 #endif
 
-// ==========================================
-// 4. Core MPI Tester
-// ==========================================
+static std::string filter_to_string(FilterKind kind) {
+    switch (kind) {
+        case FilterKind::Mans:
+            return "mans";
+        case FilterKind::Zstd:
+            return "zstd";
+        case FilterKind::Sz3:
+            return "sz3";
+        case FilterKind::Gzip:
+            return "gzip";
+        case FilterKind::None:
+            return "none";
+    }
+    return "unknown";
+}
 
-template <typename T>
-class MpiTester {
-public:
-    MpiTester(const mans::h5::MansConfig* mans_cfg,
-              hid_t h5_type,
-              const RunOptions& opts,
-              int rank,
-              int ranks)
-        : mans_config_(mans_cfg),
-          h5_native_type_(h5_type),
-          options_(opts),
-          rank_(rank),
-          ranks_(ranks) {}
+static FilterKind parse_filter(std::string_view s) {
+    if (s == "mans") {
+        return FilterKind::Mans;
+    }
+    if (s == "zstd") {
+        return FilterKind::Zstd;
+    }
+    if (s == "sz3") {
+        return FilterKind::Sz3;
+    }
+    if (s == "gzip" || s == "deflate") {
+        return FilterKind::Gzip;
+    }
+    if (s == "none") {
+        return FilterKind::None;
+    }
+    throw std::runtime_error("Unknown filter: " + std::string(s));
+}
 
-    int run() {
+static std::vector<int> parse_threads(const std::string& s) {
+    std::vector<int> values;
+    std::stringstream ss(s);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        if (item.empty()) {
+            throw std::runtime_error("Empty entry in --threads");
+        }
+        std::size_t idx = 0;
+        int v = 0;
         try {
-            setup_totals();
-            print_banner();
-
-            constexpr int kIters = 11;
-            Metrics sum{};
-            std::uint64_t max_raw_bytes = 0;
-            if (rank_ == 0) {
-                std::cout << "  Progress: 0/" << kIters << "\r" << std::flush;
-            }
-            for (int iter = 0; iter < kIters; ++iter) {
-                show_io_banner_ = (iter == 0);
-                Metrics local;
-                if (options_.mode == Mode::Compress) {
-                    local = compress_write();
-                } else {
-                    local = decompress_read();
-                }
-                if (rank_ == 0) {
-                    std::cout << "  Progress: " << (iter + 1) << "/" << kIters << "\r" << std::flush;
-                }
-                max_raw_bytes = std::max(max_raw_bytes, local.raw_bytes);
-                if (iter == 0) {
-                    continue;
-                }
-                sum.raw_io_s += local.raw_io_s;
-                sum.h5_io_s += local.h5_io_s;
-            }
-            if (rank_ == 0) {
-                std::cout << "\n";
-            }
-            Metrics local{};
-            const double denom = static_cast<double>(kIters - 1);
-            local.raw_io_s = sum.raw_io_s / denom;
-            local.h5_io_s = sum.h5_io_s / denom;
-            local.raw_bytes = max_raw_bytes;
-
-            finalize_and_report(local);
-        } catch (const std::exception& e) {
-            std::cerr << RED << "[Rank " << rank_ << "] Exception: " << e.what() << RST << "\n";
-            return 1;
+            v = std::stoi(item, &idx);
+        } catch (...) {
+            throw std::runtime_error("Invalid thread value: " + item);
         }
-        return 0;
+        if (idx != item.size() || v <= 0) {
+            throw std::runtime_error("Invalid thread value: " + item);
+        }
+        values.push_back(v);
     }
-
-private:
-    const mans::h5::MansConfig* mans_config_ = nullptr;
-    hid_t h5_native_type_ = H5T_NATIVE_UINT32;
-    RunOptions options_{};
-
-    int rank_ = 0;
-    int ranks_ = 1;
-    bool show_io_banner_ = true;
-
-    mans::h5::data_gen::SyntheticConfig synth_cfg_{};
-    std::size_t total_elements_ = 0;
-    std::size_t elem_size_ = sizeof(T);
-
-    std::size_t rank_offset_ = 0;
-    std::size_t rank_count_ = 0;
-
-    std::size_t chunk_elems_ = 0;
-
-    void setup_totals() {
-        synth_cfg_ = options_.synth_cfg;
-        const bool has_input = !options_.input_bin.empty();
-
-        if (!has_input) {
-            if (rank_ == 0) {
-                std::cerr << YLW
-                          << "[WARN] No input_bin provided. Falling back to synthetic data generated in memory only. "
-                             "Use mans_data_gen to control and persist datasets."
-                          << RST << "\n";
-            }
-            if (synth_cfg_.size_mb <= 0.0) {
-                synth_cfg_.size_mb = DEFAULT_DATA_SIZE_MB;
-                if (rank_ == 0) {
-                    std::cerr << YLW << "[WARN] Synthetic size_mb not set. Using default "
-                              << synth_cfg_.size_mb << " MB." << RST << "\n";
-                }
-            }
-        }
-
-        if (has_input) {
-            if (!fs::exists(options_.input_bin)) {
-                throw std::runtime_error("input_bin not found: " + options_.input_bin);
-            }
-            const auto bytes = fs::file_size(options_.input_bin);
-            if (bytes < elem_size_) {
-                throw std::runtime_error("input_bin is smaller than one element for the selected dtype");
-            }
-            if (rank_ == 0 && (bytes % elem_size_) != 0) {
-                std::cerr << YLW
-                          << "[WARN] input_bin size is not a multiple of element size. Trailing bytes will be ignored."
-                          << RST << "\n";
-            }
-            total_elements_ = static_cast<std::size_t>(bytes / elem_size_);
-        } else {
-            total_elements_ = mans::h5::data_gen::aligned_total_elements(
-                synth_cfg_.size_mb,
-                elem_size_,
-                synth_cfg_.block_size);
-        }
-
-        if (total_elements_ == 0) {
-            throw std::runtime_error("Computed total_elements is 0");
-        }
-
-        split_even(total_elements_, rank_, ranks_, rank_offset_, rank_count_);
-        chunk_elems_ = safe_chunk_elems(options_.chunk_mb, elem_size_, total_elements_);
-
-        if (rank_ == 0 && chunk_elems_ >= total_elements_) {
-            std::cerr << YLW << "[WARN] chunk size covers the entire dataset; only one chunk will be used." << RST
-                      << "\n";
-        }
+    if (values.size() != 8) {
+        throw std::runtime_error("--threads requires exactly 8 values");
     }
-
-    void print_banner() const {
-        if (rank_ != 0) {
-            return;
-        }
-
-        std::cout << BOLD
-                  << "========================================\n"
-                  << "   H5Z-MANS MPI Test Runner (Chunked)   \n"
-                  << "========================================" << RST << "\n";
-        std::cout << " Mode:    " << mode_to_string(options_.mode) << "\n";
-        std::cout << " Filter:  " << filter_to_string(options_.filter_id) << " (" << options_.filter_id << ")\n";
-        std::cout << " Ranks:   " << ranks_ << "\n";
-        std::cout << " Output:  " << options_.output_h5 << "\n";
-        std::cout << " Input:   " << (options_.input_bin.empty() ? "<synthetic>" : options_.input_bin) << "\n";
-        std::cout << " Total:   " << total_elements_ << " elems (" << (total_elements_ * elem_size_) / 1048576.0
-                  << " MB raw)\n";
-        std::cout << " Chunk:   " << options_.chunk_mb << " MB (" << chunk_elems_ << " elems)\n";
-        if (options_.filter_id == FILTER_ID_MANS && !options_.mans_config_file.empty()) {
-            std::cout << " MANS:    " << options_.mans_config_file << "\n";
-        }
-        std::cout << "\n";
-    }
-
-    hid_t create_file_access_plist() const {
-        hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
-        CHECK_H5(fapl);
-
-#if defined(H5_HAVE_PARALLEL)
-        CHECK_H5(H5Pset_fapl_mpio(fapl, MPI_COMM_WORLD, MPI_INFO_NULL));
-#else
-        if (ranks_ > 1 && rank_ == 0) {
-            std::cerr << YLW << "[WARN] HDF5 is not parallel-enabled; running serial access." << RST << "\n";
-        }
-#endif
-        return fapl;
-    }
-
-    hid_t create_dxpl_collective() const {
-        hid_t dxpl = H5Pcreate(H5P_DATASET_XFER);
-        CHECK_H5(dxpl);
-#if defined(H5_HAVE_PARALLEL)
-        CHECK_H5(H5Pset_dxpl_mpio(dxpl, H5FD_MPIO_COLLECTIVE));
-#endif
-        return dxpl;
-    }
-
-    void configure_filter(hid_t dcpl) const {
-        const hsize_t chunk[1] = {static_cast<hsize_t>(chunk_elems_)};
-        CHECK_H5(H5Pset_chunk(dcpl, 1, chunk));
-
-        if (options_.filter_id == FILTER_ID_NONE) {
-            if (show_io_banner_ && rank_ == 0) {
-                std::cout << "  -> Filter: " << BLU << "None" << RST << "\n";
-            }
-            return;
-        }
-
-        if (options_.filter_id == FILTER_ID_DEFLATE) {
-            const unsigned int gzip_level = 6;
-            if (show_io_banner_ && rank_ == 0) {
-                std::cout << "  -> Filter: " << BLU << "GZIP (Level " << gzip_level << ")" << RST << "\n";
-            }
-            CHECK_H5(H5Pset_deflate(dcpl, gzip_level));
-            return;
-        }
-
-        if (options_.filter_id == FILTER_ID_ZSTD) {
-            const unsigned int zstd_level = 3;
-            if (show_io_banner_ && rank_ == 0) {
-                std::cout << "  -> Filter: " << BLU << "Zstandard (Level " << zstd_level << ")" << RST << "\n";
-            }
-            const htri_t avail = H5Zfilter_avail(FILTER_ID_ZSTD);
-            if (!avail) {
-                throw std::runtime_error("Zstandard filter not available");
-            }
-            unsigned int cd_values[1] = {zstd_level};
-            CHECK_H5(H5Pset_filter(dcpl, FILTER_ID_ZSTD, H5Z_FLAG_OPTIONAL, 1, cd_values));
-            return;
-        }
-
-        if (options_.filter_id == FILTER_ID_MANS) {
-            if (!mans_config_) {
-                throw std::runtime_error("MANS filter requires --mans-config <file>");
-            }
-            if (show_io_banner_ && rank_ == 0) {
-                std::cout << "  -> Filter: " << BLU << "MANS Custom (ID " << FILTER_ID_MANS << ")" << RST << "\n";
-            }
-            const auto cd = mans_config_->to_cd_values();
-            CHECK_H5(H5Pset_filter(dcpl, FILTER_ID_MANS, 0, cd.size(), cd.data()));
-            return;
-        }
-
-        if (options_.filter_id == FILTER_ID_SZ3) {
-            if (show_io_banner_ && rank_ == 0) {
-                std::cout << "  -> Filter: " << BLU << "SZ3 Compressor (ID " << FILTER_ID_SZ3 << ")" << RST << "\n";
-            }
-            const htri_t avail = H5Zfilter_avail(FILTER_ID_SZ3);
-            if (!avail) {
-                throw std::runtime_error("SZ3 filter not available");
-            }
-
-            SZ3::Config sz3_conf;
-            static const char* sz3_ini = R"ini([GlobalSettings]
-CmprAlgo = ALGO_INTERP_LORENZO
-ErrorBoundMode = ABS
-AbsErrorBound = 1e-3
-OpenMP = YES
-
-[AlgoSettings]
-)ini";
-            sz3_conf.load_ini(sz3_ini);
-
-            std::size_t cd_nelmts = static_cast<std::size_t>(
-                std::ceil(sz3_conf.size_est() / static_cast<double>(sizeof(int))));
-            std::vector<unsigned int> cd_values(cd_nelmts, 0);
-            auto* buffer = reinterpret_cast<unsigned char*>(cd_values.data());
-            const auto conf_size_real = sz3_conf.save(buffer);
-            cd_nelmts = static_cast<std::size_t>(
-                std::ceil(conf_size_real / static_cast<double>(sizeof(int))));
-
-            CHECK_H5(H5Pset_filter(dcpl, FILTER_ID_SZ3, H5Z_FLAG_MANDATORY, cd_nelmts, cd_values.data()));
-            return;
-        }
-
-        throw std::runtime_error("Unknown filter id: " + std::to_string(options_.filter_id));
-    }
-
-    std::vector<T> load_or_generate_chunk(std::size_t global_offset, std::size_t count) const {
-        if (count == 0) {
-            return {};
-        }
-
-        if (!options_.input_bin.empty()) {
-            return mans::h5::data_gen::load_bin_slice<T>(options_.input_bin, global_offset, count);
-        }
-
-        const std::uint32_t threshold = mans_config_ ? mans_config_->get_params().adm_threshold : 4000U;
-        return mans::h5::data_gen::generate_synthetic_slice<T>(
-            threshold,
-            synth_cfg_,
-            total_elements_,
-            global_offset,
-            count);
-    }
-
-    Metrics compress_write() {
-        if (show_io_banner_ && rank_ == 0) {
-            std::cout << BOLD << "[Compress] Writing chunked dataset..." << RST << "\n";
-        }
-
-        const hid_t fapl = create_file_access_plist();
-        const hid_t file = H5Fcreate(options_.output_h5.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
-        CHECK_H5(file);
-        CHECK_H5(H5Pclose(fapl));
-
-        const hsize_t dims[1] = {static_cast<hsize_t>(total_elements_)};
-        const hid_t filespace = H5Screate_simple(1, dims, nullptr);
-        CHECK_H5(filespace);
-
-        const hid_t dcpl = H5Pcreate(H5P_DATASET_CREATE);
-        CHECK_H5(dcpl);
-        configure_filter(dcpl);
-
-        const hid_t dset = H5Dcreate2(file, "dataset", h5_native_type_, filespace, H5P_DEFAULT, dcpl, H5P_DEFAULT);
-        CHECK_H5(dset);
-        CHECK_H5(H5Pclose(dcpl));
-        CHECK_H5(H5Sclose(filespace));
-
-        const hid_t dxpl = create_dxpl_collective();
-
-        Metrics m{};
-        T dummy_value{};
-
-        const hid_t fspace = H5Dget_space(dset);
-        CHECK_H5(fspace);
-
-        if (rank_count_ > 0) {
-            const hsize_t file_offset[1] = {static_cast<hsize_t>(rank_offset_)};
-            const hsize_t file_count[1] = {static_cast<hsize_t>(rank_count_)};
-            CHECK_H5(H5Sselect_hyperslab(fspace, H5S_SELECT_SET, file_offset, nullptr, file_count, nullptr));
-
-            auto t0 = std::chrono::steady_clock::now();
-            std::vector<T> slice = load_or_generate_chunk(rank_offset_, rank_count_);
-            auto t1 = std::chrono::steady_clock::now();
-            m.raw_io_s += seconds_since(t0, t1);
-            m.raw_bytes += static_cast<std::uint64_t>(rank_count_) * elem_size_;
-
-            const hid_t mspace = H5Screate_simple(1, file_count, nullptr);
-            CHECK_H5(mspace);
-
-            auto t2 = std::chrono::steady_clock::now();
-            {
-                MANS_TIMING_RUN_SCOPE();
-                CHECK_H5(H5Dwrite(dset, h5_native_type_, mspace, fspace, dxpl, slice.data()));
-            }
-            auto t3 = std::chrono::steady_clock::now();
-            m.h5_io_s += seconds_since(t2, t3);
-
-            CHECK_H5(H5Sclose(mspace));
-        } else {
-            CHECK_H5(H5Sselect_none(fspace));
-            const hsize_t one[1] = {1};
-            const hid_t mspace = H5Screate_simple(1, one, nullptr);
-            CHECK_H5(mspace);
-            CHECK_H5(H5Sselect_none(mspace));
-
-            {
-                MANS_TIMING_RUN_SCOPE();
-                CHECK_H5(H5Dwrite(dset, h5_native_type_, mspace, fspace, dxpl, &dummy_value));
-            }
-
-            CHECK_H5(H5Sclose(mspace));
-        }
-
-        CHECK_H5(H5Sclose(fspace));
-
-        CHECK_H5(H5Fflush(file, H5F_SCOPE_GLOBAL));
-        CHECK_H5(H5Pclose(dxpl));
-        CHECK_H5(H5Dclose(dset));
-        CHECK_H5(H5Fclose(file));
-
-        return m;
-    }
-
-    Metrics decompress_read() {
-        if (show_io_banner_ && rank_ == 0) {
-            std::cout << BOLD << "[Decompress] Reading chunked dataset..." << RST << "\n";
-        }
-
-        const hid_t fapl = create_file_access_plist();
-        const hid_t file = H5Fopen(options_.output_h5.c_str(), H5F_ACC_RDONLY, fapl);
-        CHECK_H5(file);
-        CHECK_H5(H5Pclose(fapl));
-
-        const hid_t dset = H5Dopen2(file, "dataset", H5P_DEFAULT);
-        CHECK_H5(dset);
-
-        const hid_t dxpl = create_dxpl_collective();
-
-        Metrics m{};
-        T dummy_value{};
-
-        const hid_t fspace = H5Dget_space(dset);
-        CHECK_H5(fspace);
-
-        if (rank_count_ > 0) {
-            const hsize_t file_offset[1] = {static_cast<hsize_t>(rank_offset_)};
-            const hsize_t file_count[1] = {static_cast<hsize_t>(rank_count_)};
-            CHECK_H5(H5Sselect_hyperslab(fspace, H5S_SELECT_SET, file_offset, nullptr, file_count, nullptr));
-
-            std::vector<T> slice(rank_count_);
-            m.raw_bytes += static_cast<std::uint64_t>(rank_count_) * elem_size_;
-
-            const hid_t mspace = H5Screate_simple(1, file_count, nullptr);
-            CHECK_H5(mspace);
-
-            auto t0 = std::chrono::steady_clock::now();
-            {
-                MANS_TIMING_RUN_SCOPE();
-                CHECK_H5(H5Dread(dset, h5_native_type_, mspace, fspace, dxpl, slice.data()));
-            }
-            auto t1 = std::chrono::steady_clock::now();
-            m.h5_io_s += seconds_since(t0, t1);
-
-            auto t2 = std::chrono::steady_clock::now();
-            const std::string dump_path = options_.output_h5 + ".rank" + std::to_string(rank_) + ".raw.bin";
-            {
-                std::ofstream out(dump_path, std::ios::binary | std::ios::app);
-                if (!out.is_open()) {
-                    throw std::runtime_error("Failed to open raw dump: " + dump_path);
-                }
-                out.write(reinterpret_cast<const char*>(slice.data()),
-                          static_cast<std::streamsize>(slice.size() * sizeof(T)));
-            }
-            auto t3 = std::chrono::steady_clock::now();
-            m.raw_io_s += seconds_since(t2, t3);
-
-            CHECK_H5(H5Sclose(mspace));
-        } else {
-            CHECK_H5(H5Sselect_none(fspace));
-            const hsize_t one[1] = {1};
-            const hid_t mspace = H5Screate_simple(1, one, nullptr);
-            CHECK_H5(mspace);
-            CHECK_H5(H5Sselect_none(mspace));
-
-            {
-                MANS_TIMING_RUN_SCOPE();
-                CHECK_H5(H5Dread(dset, h5_native_type_, mspace, fspace, dxpl, &dummy_value));
-            }
-
-            CHECK_H5(H5Sclose(mspace));
-        }
-
-        CHECK_H5(H5Sclose(fspace));
-
-        CHECK_H5(H5Pclose(dxpl));
-        CHECK_H5(H5Dclose(dset));
-        CHECK_H5(H5Fclose(file));
-
-        return m;
-    }
-
-    void finalize_and_report(const Metrics& local) const {
-        Metrics agg = local;
-
-#if defined(H5_HAVE_PARALLEL)
-        std::vector<std::uint64_t> per_rank_raw_bytes;
-        auto reduce_max = [&](double v) {
-            double out = 0.0;
-            MPI_Reduce(&v, &out, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
-            return out;
-        };
-        auto reduce_sum_u64 = [&](std::uint64_t v) {
-            std::uint64_t out = 0;
-            MPI_Reduce(&v, &out, 1, MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
-            return out;
-        };
-
-        agg.raw_io_s = reduce_max(local.raw_io_s);
-        agg.h5_io_s = reduce_max(local.h5_io_s);
-        agg.raw_bytes = reduce_sum_u64(local.raw_bytes);
-
-        if (rank_ == 0) {
-            per_rank_raw_bytes.resize(static_cast<std::size_t>(ranks_), 0);
-        }
-        MPI_Gather(&local.raw_bytes, 1, MPI_UINT64_T,
-                   per_rank_raw_bytes.data(), 1, MPI_UINT64_T,
-                   0, MPI_COMM_WORLD);
-#else
-        (void)local;
-#endif
-
-        if (rank_ != 0) {
-            return;
-        }
-
-        const double raw_mb = static_cast<double>(agg.raw_bytes) / 1048576.0;
-        const double raw_io_thr = agg.raw_io_s > 0.0 ? raw_mb / agg.raw_io_s : 0.0;
-        const double h5_thr = agg.h5_io_s > 0.0 ? raw_mb / agg.h5_io_s : 0.0;
-
-        std::cout << "\n" << BOLD << "[Summary]" << RST << "\n";
-        if (options_.mode == Mode::Compress) {
-            std::cout << "  raw_read_s:     " << BLU << agg.raw_io_s << RST << " (" << BLU << raw_io_thr << " MB/s" << RST << ")\n";
-            std::cout << "  h5dwrite_s:     " << BLU << agg.h5_io_s << RST << " (" << BLU << h5_thr << " MB/s" << RST << ")\n";
-        } else {
-            std::cout << "  h5dread_s:      " << BLU << agg.h5_io_s << RST << " (" << BLU << h5_thr << " MB/s" << RST << ")\n";
-            std::cout << "  raw_write_s:    " << BLU << agg.raw_io_s << RST << " (" << BLU << raw_io_thr << " MB/s" << RST << ")\n";
-        }
-
-#if defined(H5_HAVE_PARALLEL)
-        if (!per_rank_raw_bytes.empty()) {
-            double max_local_raw_mb = 0.0;
-            for (const auto bytes : per_rank_raw_bytes) {
-                max_local_raw_mb = std::max(max_local_raw_mb,
-                                            static_cast<double>(bytes) / 1048576.0);
-            }
-            const double local_raw_thr = agg.raw_io_s > 0.0 ? max_local_raw_mb / agg.raw_io_s : 0.0;
-            const double local_h5_thr = agg.h5_io_s > 0.0 ? max_local_raw_mb / agg.h5_io_s : 0.0;
-            if (options_.mode == Mode::Compress) {
-                std::cout << "  local_raw_read_s:  " << BLU << agg.raw_io_s << RST
-                          << " (" << BLU << local_raw_thr << " MB/s" << RST << ")\n";
-                std::cout << "  local_h5dwrite_s:  " << BLU << agg.h5_io_s << RST
-                          << " (" << BLU << local_h5_thr << " MB/s" << RST << ")\n";
-            } else {
-                std::cout << "  local_h5dread_s:   " << BLU << agg.h5_io_s << RST
-                          << " (" << BLU << local_h5_thr << " MB/s" << RST << ")\n";
-                std::cout << "  local_raw_write_s: " << BLU << agg.raw_io_s << RST
-                          << " (" << BLU << local_raw_thr << " MB/s" << RST << ")\n";
-            }
-        }
-#endif
-
-        const std::string csv_path = options_.metrics_csv.empty()
-            ? (options_.output_h5 + ".mpi_metrics.csv")
-            : options_.metrics_csv;
-        append_metrics_csv(csv_path, options_, total_elements_, elem_size_, ranks_, agg, raw_io_thr, h5_thr);
-
-        std::cout << "  metrics_csv:    " << GRN << csv_path << RST << "\n";
-    }
-};
-
-// ==========================================
-// 5. CLI Parsing
-// ==========================================
+    return values;
+}
 
 static void print_usage(const char* prog) {
-    std::cerr << YLW
-              << "Usage:\n  " << prog
-              << " --config <test.cfg> [--input raw.bin] [--output out.h5] [--chunk-mb MB]\\\n"
-                 "         [--filter mans|zstd|gzip|sz3|none] [--mode compress|decompress]\\\n"
-                 "         [--ranks N] [--mans-config mans.cfg] [--dataset-config synth.cfg] [--csv metrics.csv]"
-              << RST << "\n";
+    std::cerr
+        << "Usage: " << prog
+        << " [--dataset-mb N] [--chunk-mb N] [--filter mans|zstd|sz3|gzip|none]\n"
+           "             [--threads v1,v2,v3,v4,v5,v6,v7,v8] [--output file.h5]\n";
 }
 
-static int parse_filter(std::string_view name) {
-    if (name == "none") {
-        return FILTER_ID_NONE;
-    }
-    if (name == "gzip" || name == "deflate") {
-        return FILTER_ID_DEFLATE;
-    }
-    if (name == "zstd") {
-        return FILTER_ID_ZSTD;
-    }
-    if (name == "mans") {
-        return FILTER_ID_MANS;
-    }
-    if (name == "sz3") {
-        return FILTER_ID_SZ3;
-    }
-    return std::stoi(std::string(name));
-}
+static Options parse_args(int argc, char** argv) {
+    Options opts;
 
-static Mode parse_mode(std::string_view name) {
-    if (name == "compress") {
-        return Mode::Compress;
-    }
-    if (name == "decompress") {
-        return Mode::Decompress;
-    }
-    throw std::runtime_error("Unknown mode: " + std::string(name));
-}
-
-static std::string trim_copy(const std::string& str) {
-    const char* whitespace = " \t\r\n";
-    const auto first = str.find_first_not_of(whitespace);
-    if (first == std::string::npos) {
-        return "";
-    }
-    const auto last = str.find_last_not_of(whitespace);
-    return str.substr(first, last - first + 1);
-}
-
-static bool is_dataset_config_key(const std::string& key) {
-    return key == "size_mb" || key == "ratio_smooth" || key == "ratio_spike" || key == "ratio_random" ||
-           key == "noise_range" || key == "block_size" || key == "seed" ||
-           key == "output_bin" || key == "dtype" || key == "adm_threshold";
-}
-
-static void apply_run_config_kv(RunOptions& opts,
-                                const std::string& key,
-                                const std::string& val,
-                                int rank) {
-    if (key == "input" || key == "input_bin") {
-        opts.input_bin = val;
-        return;
-    }
-    if (key == "output" || key == "output_h5") {
-        opts.output_h5 = val;
-        return;
-    }
-    if (key == "chunk" || key == "chunk_mb") {
-        opts.chunk_mb = std::stod(val);
-        return;
-    }
-    if (key == "filter") {
-        opts.filter_id = parse_filter(val);
-        return;
-    }
-    if (key == "mode") {
-        opts.mode = parse_mode(val);
-        return;
-    }
-    if (key == "ranks" || key == "expected_ranks") {
-        opts.expected_ranks = std::stoi(val);
-        return;
-    }
-    if (key == "mans_config" || key == "mans_config_file") {
-        opts.mans_config_file = val;
-        return;
-    }
-    if (key == "dataset_config" || key == "dataset_config_file") {
-        opts.dataset_config_file = val;
-        return;
-    }
-    if (key == "csv" || key == "metrics_csv") {
-        opts.metrics_csv = val;
-        return;
-    }
-
-    if (is_dataset_config_key(key)) {
-        if (rank == 0) {
-            std::cerr << YLW << "[WARN] Dataset generation key '" << key
-                      << "' is ignored by H5Z-MANS_test. Use mans_data_gen instead." << RST << "\n";
-        }
-        return;
-    }
-
-    if (rank == 0) {
-        std::cerr << YLW << "[WARN] Unknown config key: " << key << RST << "\n";
-    }
-}
-
-static void load_run_config(const std::string& path, RunOptions& opts, int rank) {
-    std::ifstream in(path);
-    if (!in.is_open()) {
-        throw std::runtime_error("Failed to open config: " + path);
-    }
-
-    std::string line;
-    while (std::getline(in, line)) {
-        const auto hash = line.find('#');
-        if (hash != std::string::npos) {
-            line = line.substr(0, hash);
-        }
-        line = trim_copy(line);
-        if (line.empty()) {
-            continue;
-        }
-
-        const auto eq = line.find('=');
-        if (eq == std::string::npos) {
-            continue;
-        }
-        const auto key = trim_copy(line.substr(0, eq));
-        const auto val = trim_copy(line.substr(eq + 1));
-        if (key.empty() || val.empty()) {
-            continue;
-        }
-        apply_run_config_kv(opts, key, val, rank);
-    }
-}
-
-static std::optional<RunOptions> parse_args(int argc, char** argv, int rank) {
-    RunOptions opts;
-    std::string config_file;
-
-    // First pass: find --config so it can provide defaults.
     for (int i = 1; i < argc; ++i) {
-        const std::string arg = argv[i];
-        if (arg != "--config") {
-            continue;
-        }
-        if (i + 1 >= argc) {
-            throw std::runtime_error("Missing value for --config");
-        }
-        config_file = argv[++i];
-    }
-
-    if (!config_file.empty()) {
-        load_run_config(config_file, opts, rank);
-    }
-
-    // Second pass: CLI overrides.
-    for (int i = 1; i < argc; ++i) {
-        const std::string arg = argv[i];
+        std::string arg = argv[i];
         auto need_value = [&](const char* flag) -> std::string {
             if (i + 1 >= argc) {
                 throw std::runtime_error(std::string("Missing value for ") + flag);
@@ -915,16 +194,8 @@ static std::optional<RunOptions> parse_args(int argc, char** argv, int rank) {
             return argv[++i];
         };
 
-        if (arg == "--config") {
-            (void)need_value("--config");
-            continue;
-        }
-        if (arg == "--input") {
-            opts.input_bin = need_value("--input");
-            continue;
-        }
-        if (arg == "--output") {
-            opts.output_h5 = need_value("--output");
+        if (arg == "--dataset-mb") {
+            opts.dataset_mb = std::stod(need_value("--dataset-mb"));
             continue;
         }
         if (arg == "--chunk-mb") {
@@ -932,78 +203,451 @@ static std::optional<RunOptions> parse_args(int argc, char** argv, int rank) {
             continue;
         }
         if (arg == "--filter") {
-            opts.filter_id = parse_filter(need_value("--filter"));
+            opts.filter = parse_filter(need_value("--filter"));
             continue;
         }
-        if (arg == "--mode") {
-            opts.mode = parse_mode(need_value("--mode"));
+        if (arg == "--threads") {
+            opts.threads = parse_threads(need_value("--threads"));
+            opts.threads_from_user = true;
             continue;
         }
-        if (arg == "--ranks") {
-            opts.expected_ranks = std::stoi(need_value("--ranks"));
-            continue;
-        }
-        if (arg == "--mans-config") {
-            opts.mans_config_file = need_value("--mans-config");
-            continue;
-        }
-        if (arg == "--dataset-config") {
-            opts.dataset_config_file = need_value("--dataset-config");
-            continue;
-        }
-        if (arg == "--csv") {
-            opts.metrics_csv = need_value("--csv");
+        if (arg == "--output") {
+            opts.output_h5 = need_value("--output");
             continue;
         }
         if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
-            return std::nullopt;
+            std::exit(0);
         }
 
         throw std::runtime_error("Unknown argument: " + arg);
     }
 
-    // Load dataset config after CLI overrides so it behaves like a default.
-    if (opts.input_bin.empty() && !opts.dataset_config_file.empty()) {
-        const auto gen_cfg = mans::h5::data_gen::load_generator_config(opts.dataset_config_file);
-        opts.synth_cfg = gen_cfg.synth;
-        if (rank == 0 && (!gen_cfg.output_bin.empty() || gen_cfg.dtype != mans::DataType::U32 ||
-                          gen_cfg.adm_threshold != 4000U)) {
-            std::cerr << YLW
-                      << "[WARN] dataset_config_file provides output/dtype/adm_threshold which are ignored by "
-                         "H5Z-MANS_test."
-                      << RST << "\n";
-        }
+    if (opts.dataset_mb <= 0.0) {
+        throw std::runtime_error("dataset-mb must be positive");
     }
-
-    if (opts.output_h5.empty() || opts.chunk_mb <= 0.0) {
-        print_usage(argv[0]);
-        return std::nullopt;
-    }
-
-    // Keep previous defaults where not overridden.
-    if (opts.filter_id == FILTER_ID_MANS && opts.mans_config_file.empty()) {
-        std::cerr << RED << "[Error] --mans-config is required when --filter mans" << RST << "\n";
-        return std::nullopt;
+    if (opts.chunk_mb <= 0.0) {
+        throw std::runtime_error("chunk-mb must be positive");
     }
 
     return opts;
 }
 
-// ==========================================
-// 6. Main
-// ==========================================
+static void split_even(std::size_t total, int rank, int ranks,
+                       std::size_t& offset, std::size_t& count) {
+    const std::size_t base = total / static_cast<std::size_t>(ranks);
+    const std::size_t rem = total % static_cast<std::size_t>(ranks);
+    if (static_cast<std::size_t>(rank) < rem) {
+        count = base + 1;
+        offset = static_cast<std::size_t>(rank) * count;
+    } else {
+        count = base;
+        offset = rem * (base + 1) + (static_cast<std::size_t>(rank) - rem) * base;
+    }
+}
+
+static std::size_t chunk_elements(double chunk_mb, std::size_t elem_size,
+                                  std::size_t total_elements) {
+    const auto chunk_bytes = static_cast<std::size_t>(chunk_mb * 1024.0 * 1024.0);
+    std::size_t elems = elem_size == 0 ? 0 : (chunk_bytes / elem_size);
+    if (elems == 0) {
+        elems = 1;
+    }
+    return std::min(elems, total_elements);
+}
+
+static mans::MansParams build_mans_params(const Options& opts) {
+    mans::MansParams params{};
+    params.backend = mans::Backend::CPU;
+    params.dtype = mans::DataType::U16;
+    params.adm_threshold = DEFAULT_ADM_THRESHOLD;
+
+    if (!opts.threads_from_user) {
+        params.adm_decide_threads = 0;
+        params.adm_center_calc_threads = 0;
+        params.adm_encode_threads = 0;
+        params.adm_warp_reduce_threads = 0;
+        params.adm_fill_tail_threads = 0;
+        params.adm_write_back_threads = 0;
+        params.adm_restore_signals_threads = 0;
+        params.adm_decode_values_threads = 0;
+        return params;
+    }
+
+    params.adm_decide_threads = static_cast<std::uint32_t>(opts.threads[0]);
+    params.adm_center_calc_threads = static_cast<std::uint32_t>(opts.threads[1]);
+    params.adm_encode_threads = static_cast<std::uint32_t>(opts.threads[2]);
+    params.adm_warp_reduce_threads = static_cast<std::uint32_t>(opts.threads[3]);
+    params.adm_fill_tail_threads = static_cast<std::uint32_t>(opts.threads[4]);
+    params.adm_write_back_threads = static_cast<std::uint32_t>(opts.threads[5]);
+    params.adm_restore_signals_threads = static_cast<std::uint32_t>(opts.threads[6]);
+    params.adm_decode_values_threads = static_cast<std::uint32_t>(opts.threads[7]);
+    return params;
+}
+
+static bool resolve_auto_threads(const std::string& csv_path,
+                                 std::size_t chunk_elems,
+                                 std::vector<int>& out_threads) {
+    std::vector<mans::cpu::CsvThreadConfig> configs;
+    std::string error;
+    if (!mans::cpu::load_thread_csv(csv_path, configs, error)) {
+        return false;
+    }
+    mans::cpu::CsvThreadConfig chosen{};
+    if (!mans::cpu::find_nearest_threads(configs, chunk_elems, chosen)) {
+        return false;
+    }
+    out_threads = {
+        static_cast<int>(chosen.adm_decide_threads),
+        static_cast<int>(chosen.compress_threads),
+        static_cast<int>(chosen.compress_threads),
+        static_cast<int>(chosen.compress_threads),
+        static_cast<int>(chosen.compress_threads),
+        static_cast<int>(chosen.compress_threads),
+        static_cast<int>(chosen.decompress_threads),
+        static_cast<int>(chosen.decompress_threads)
+    };
+    return true;
+}
+
+static void configure_filter(hid_t dcpl,
+                             const Options& opts,
+                             const mans::MansParams& mans_params,
+                             std::size_t chunk_elems) {
+    const hsize_t chunk[1] = {static_cast<hsize_t>(chunk_elems)};
+    CHECK_H5(H5Pset_chunk(dcpl, 1, chunk));
+
+    if (opts.filter == FilterKind::None) {
+        return;
+    }
+
+    if (opts.filter == FilterKind::Gzip) {
+        const unsigned int gzip_level = 6;
+        CHECK_H5(H5Pset_deflate(dcpl, gzip_level));
+        return;
+    }
+
+    if (opts.filter == FilterKind::Zstd) {
+        const unsigned int zstd_level = 3;
+        const htri_t avail = H5Zfilter_avail(FILTER_ID_ZSTD);
+        if (!avail) {
+            throw std::runtime_error("Zstandard filter not available");
+        }
+        unsigned int cd_values[1] = {zstd_level};
+        CHECK_H5(H5Pset_filter(dcpl, FILTER_ID_ZSTD, H5Z_FLAG_OPTIONAL, 1, cd_values));
+        return;
+    }
+
+    if (opts.filter == FilterKind::Mans) {
+        const std::size_t cd_count = sizeof(mans::MansParams) / sizeof(unsigned int);
+        std::vector<unsigned int> cd(cd_count, 0);
+        std::memcpy(cd.data(), &mans_params, sizeof(mans::MansParams));
+        CHECK_H5(H5Pset_filter(dcpl, FILTER_ID_MANS, 0, cd.size(), cd.data()));
+        return;
+    }
+
+    if (opts.filter == FilterKind::Sz3) {
+        const htri_t avail = H5Zfilter_avail(FILTER_ID_SZ3);
+        if (!avail) {
+            throw std::runtime_error("SZ3 filter not available");
+        }
+
+        SZ3::Config sz3_conf;
+        static const char* sz3_ini = R"ini([GlobalSettings]
+CmprAlgo = ALGO_INTERP_LORENZO
+ErrorBoundMode = ABS
+AbsErrorBound = 1e-3
+OpenMP = YES
+
+[AlgoSettings]
+)ini";
+        sz3_conf.load_ini(sz3_ini);
+
+        std::size_t cd_nelmts = static_cast<std::size_t>(
+            std::ceil(sz3_conf.size_est() / static_cast<double>(sizeof(int))));
+        std::vector<unsigned int> cd_values(cd_nelmts, 0);
+        auto* buffer = reinterpret_cast<unsigned char*>(cd_values.data());
+        const auto conf_size_real = sz3_conf.save(buffer);
+        cd_nelmts = static_cast<std::size_t>(
+            std::ceil(conf_size_real / static_cast<double>(sizeof(int))));
+
+        CHECK_H5(H5Pset_filter(dcpl, FILTER_ID_SZ3, H5Z_FLAG_MANDATORY,
+                               cd_nelmts, cd_values.data()));
+        return;
+    }
+
+    throw std::runtime_error("Unknown filter");
+}
+
+static hid_t create_fapl(bool use_mpio) {
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    CHECK_H5(fapl);
+#if defined(H5_HAVE_PARALLEL)
+    if (use_mpio) {
+        CHECK_H5(H5Pset_fapl_mpio(fapl, MPI_COMM_WORLD, MPI_INFO_NULL));
+    }
+#else
+    (void)use_mpio;
+#endif
+    return fapl;
+}
+
+static hid_t create_dxpl(bool use_mpio) {
+    hid_t dxpl = H5Pcreate(H5P_DATASET_XFER);
+    CHECK_H5(dxpl);
+#if defined(H5_HAVE_PARALLEL)
+    if (use_mpio) {
+        CHECK_H5(H5Pset_dxpl_mpio(dxpl, H5FD_MPIO_COLLECTIVE));
+    }
+#else
+    (void)use_mpio;
+#endif
+    return dxpl;
+}
+
+static void sync_file(hid_t file, bool use_mpio) {
+    void* handle = nullptr;
+    CHECK_H5(H5Fget_vfd_handle(file, H5P_DEFAULT, &handle));
+
+#if defined(H5_HAVE_PARALLEL)
+    if (use_mpio) {
+        MPI_File* mpif = static_cast<MPI_File*>(handle);
+        MPI_File_sync(*mpif);
+        return;
+    }
+#endif
+
+    int fd = *static_cast<int*>(handle);
+    if (::fsync(fd) != 0) {
+        std::cerr << YLW << "[WARN] fsync failed" << RST << "\n";
+    }
+}
+
+static void drop_cache_best_effort(const std::string& path) {
+    int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        return;
+    }
+#if defined(POSIX_FADV_DONTNEED)
+    (void)::posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+#endif
+    ::close(fd);
+}
+
+static double write_hdf5(const Options& opts,
+                         const mans::MansParams& params,
+                         const std::vector<std::uint16_t>& local_data,
+                         std::size_t total_elements,
+                         std::size_t chunk_elems,
+                         std::size_t rank_offset,
+                         std::size_t rank_count,
+                         bool use_mpio,
+                         std::uint64_t& compressed_bytes_out) {
+    const hid_t fapl = create_fapl(use_mpio);
+    const hid_t file = H5Fcreate(opts.output_h5.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
+    CHECK_H5(file);
+    CHECK_H5(H5Pclose(fapl));
+
+    const hsize_t dims[1] = {static_cast<hsize_t>(total_elements)};
+    const hid_t filespace = H5Screate_simple(1, dims, nullptr);
+    CHECK_H5(filespace);
+
+    const hid_t dcpl = H5Pcreate(H5P_DATASET_CREATE);
+    CHECK_H5(dcpl);
+    configure_filter(dcpl, opts, params, chunk_elems);
+
+    const hid_t dset = H5Dcreate2(file, "dataset", H5T_NATIVE_UINT16, filespace,
+                                  H5P_DEFAULT, dcpl, H5P_DEFAULT);
+    CHECK_H5(dset);
+    CHECK_H5(H5Pclose(dcpl));
+    CHECK_H5(H5Sclose(filespace));
+
+    const hid_t dxpl = create_dxpl(use_mpio);
+    const hid_t fspace = H5Dget_space(dset);
+    CHECK_H5(fspace);
+
+    if (rank_count > 0) {
+        const hsize_t file_offset[1] = {static_cast<hsize_t>(rank_offset)};
+        const hsize_t file_count[1] = {static_cast<hsize_t>(rank_count)};
+        CHECK_H5(H5Sselect_hyperslab(fspace, H5S_SELECT_SET, file_offset, nullptr, file_count, nullptr));
+
+        const hid_t mspace = H5Screate_simple(1, file_count, nullptr);
+        CHECK_H5(mspace);
+
+        auto t0 = std::chrono::steady_clock::now();
+        {
+            MANS_TIMING_SCOPE("hdf5/write");
+            CHECK_H5(H5Dwrite(dset, H5T_NATIVE_UINT16, mspace, fspace, dxpl, local_data.data()));
+            CHECK_H5(H5Fflush(file, H5F_SCOPE_GLOBAL));
+            sync_file(file, use_mpio);
+        }
+        auto t1 = std::chrono::steady_clock::now();
+
+        compressed_bytes_out = static_cast<std::uint64_t>(H5Dget_storage_size(dset));
+
+        CHECK_H5(H5Sclose(mspace));
+        CHECK_H5(H5Sclose(fspace));
+        CHECK_H5(H5Pclose(dxpl));
+        CHECK_H5(H5Dclose(dset));
+        CHECK_H5(H5Fclose(file));
+
+        return std::chrono::duration<double>(t1 - t0).count();
+    }
+
+    CHECK_H5(H5Sselect_none(fspace));
+    const hsize_t one[1] = {1};
+    const hid_t mspace = H5Screate_simple(1, one, nullptr);
+    CHECK_H5(mspace);
+    CHECK_H5(H5Sselect_none(mspace));
+
+    std::uint16_t dummy = 0;
+    auto t0 = std::chrono::steady_clock::now();
+    {
+        MANS_TIMING_SCOPE("hdf5/write");
+        CHECK_H5(H5Dwrite(dset, H5T_NATIVE_UINT16, mspace, fspace, dxpl, &dummy));
+        CHECK_H5(H5Fflush(file, H5F_SCOPE_GLOBAL));
+        sync_file(file, use_mpio);
+    }
+    auto t1 = std::chrono::steady_clock::now();
+
+    compressed_bytes_out = static_cast<std::uint64_t>(H5Dget_storage_size(dset));
+
+    CHECK_H5(H5Sclose(mspace));
+    CHECK_H5(H5Sclose(fspace));
+    CHECK_H5(H5Pclose(dxpl));
+    CHECK_H5(H5Dclose(dset));
+    CHECK_H5(H5Fclose(file));
+
+    return std::chrono::duration<double>(t1 - t0).count();
+}
+
+static double read_hdf5(const Options& opts,
+                        std::vector<std::uint16_t>& out,
+                        std::size_t rank_offset,
+                        std::size_t rank_count,
+                        bool use_mpio) {
+    const hid_t fapl = create_fapl(use_mpio);
+    const hid_t file = H5Fopen(opts.output_h5.c_str(), H5F_ACC_RDONLY, fapl);
+    CHECK_H5(file);
+    CHECK_H5(H5Pclose(fapl));
+
+    const hid_t dset = H5Dopen2(file, "dataset", H5P_DEFAULT);
+    CHECK_H5(dset);
+
+    const hid_t dxpl = create_dxpl(use_mpio);
+    const hid_t fspace = H5Dget_space(dset);
+    CHECK_H5(fspace);
+
+    if (rank_count > 0) {
+        const hsize_t file_offset[1] = {static_cast<hsize_t>(rank_offset)};
+        const hsize_t file_count[1] = {static_cast<hsize_t>(rank_count)};
+        CHECK_H5(H5Sselect_hyperslab(fspace, H5S_SELECT_SET, file_offset, nullptr, file_count, nullptr));
+
+        const hid_t mspace = H5Screate_simple(1, file_count, nullptr);
+        CHECK_H5(mspace);
+
+        auto t0 = std::chrono::steady_clock::now();
+        {
+            MANS_TIMING_SCOPE("hdf5/read");
+            CHECK_H5(H5Dread(dset, H5T_NATIVE_UINT16, mspace, fspace, dxpl, out.data()));
+        }
+        auto t1 = std::chrono::steady_clock::now();
+
+        CHECK_H5(H5Sclose(mspace));
+        CHECK_H5(H5Sclose(fspace));
+        CHECK_H5(H5Pclose(dxpl));
+        CHECK_H5(H5Dclose(dset));
+        CHECK_H5(H5Fclose(file));
+
+        return std::chrono::duration<double>(t1 - t0).count();
+    }
+
+    CHECK_H5(H5Sselect_none(fspace));
+    const hsize_t one[1] = {1};
+    const hid_t mspace = H5Screate_simple(1, one, nullptr);
+    CHECK_H5(mspace);
+    CHECK_H5(H5Sselect_none(mspace));
+
+    std::uint16_t dummy = 0;
+    auto t0 = std::chrono::steady_clock::now();
+    {
+        MANS_TIMING_SCOPE("hdf5/read");
+        CHECK_H5(H5Dread(dset, H5T_NATIVE_UINT16, mspace, fspace, dxpl, &dummy));
+    }
+    auto t1 = std::chrono::steady_clock::now();
+
+    CHECK_H5(H5Sclose(mspace));
+    CHECK_H5(H5Sclose(fspace));
+    CHECK_H5(H5Pclose(dxpl));
+    CHECK_H5(H5Dclose(dset));
+    CHECK_H5(H5Fclose(file));
+
+    return std::chrono::duration<double>(t1 - t0).count();
+}
+
+static void print_config(const Options& opts,
+                         std::size_t total_elements,
+                         std::size_t elem_size,
+                         std::size_t chunk_elems,
+                         int ranks,
+                         bool use_mpio) {
+    const double total_mb = (static_cast<double>(total_elements) * elem_size) / 1048576.0;
+    const double rank_mb = total_mb / static_cast<double>(ranks);
+    const double chunk_mb = (static_cast<double>(chunk_elems) * elem_size) / 1048576.0;
+
+    std::cout << BOLD
+              << "========================================\n"
+              << "   H5Z-MANS HDF5 MPI Benchmark (U16)   \n"
+              << "========================================" << RST << "\n";
+    std::cout << "  dataset_mb(target): " << opts.dataset_mb << "\n";
+    std::cout << "  dataset_mb(actual): " << total_mb << "\n";
+    std::cout << "  per_rank_mb(avg):   " << rank_mb << "\n";
+    std::cout << "  chunk_mb(actual):   " << chunk_mb << "\n";
+    std::cout << "  filter:             " << filter_to_string(opts.filter) << "\n";
+    std::cout << "  output:             " << opts.output_h5 << "\n";
+    std::cout << "  ranks:              " << ranks << (use_mpio ? " (mpi)" : " (serial)") << "\n";
+
+    if (opts.filter == FilterKind::Mans) {
+        if (opts.threads_from_user) {
+            std::cout << "  threads:            ";
+            for (std::size_t i = 0; i < opts.threads.size(); ++i) {
+                std::cout << opts.threads[i];
+                if (i + 1 != opts.threads.size()) {
+                    std::cout << ",";
+                }
+            }
+            std::cout << " (user)\n";
+        } else {
+            const char* csv_env = std::getenv("MANS_THREAD_CSV");
+            std::string csv_path = (csv_env && csv_env[0] != '\0') ? csv_env : "best_threads.csv";
+            std::vector<int> auto_threads;
+            if (resolve_auto_threads(csv_path, chunk_elems, auto_threads)) {
+                std::cout << "  threads:            ";
+                for (std::size_t i = 0; i < auto_threads.size(); ++i) {
+                    std::cout << auto_threads[i];
+                    if (i + 1 != auto_threads.size()) {
+                        std::cout << ",";
+                    }
+                }
+                std::cout << " (auto, " << csv_path << ")\n";
+            } else {
+                std::cout << "  threads:            auto (" << csv_path << ")\n";
+            }
+        }
+    }
+    std::cout << "\n";
+}
+
+static double mb_from_bytes(double bytes) {
+    return bytes / 1048576.0;
+}
 
 int main(int argc, char** argv) {
     MpiContext mpi(argc, argv);
 
-    RunOptions opts;
+    Options opts;
     try {
-        const auto parsed = parse_args(argc, argv, mpi.rank);
-        if (!parsed.has_value()) {
-            return 1;
-        }
-        opts = *parsed;
+        opts = parse_args(argc, argv);
     } catch (const std::exception& e) {
         if (mpi.rank == 0) {
             std::cerr << RED << "Arg parse error: " << e.what() << RST << "\n";
@@ -1012,36 +656,177 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (opts.expected_ranks > 0 && opts.expected_ranks != mpi.ranks && mpi.rank == 0) {
-        std::cerr << YLW << "[WARN] --ranks " << opts.expected_ranks
-                  << " does not match MPI world size " << mpi.ranks << ". Using MPI size." << RST << "\n";
-    }
+#if defined(H5_HAVE_PARALLEL)
+    const bool use_mpio = true;
+#else
+    const bool use_mpio = false;
+#endif
 
-    std::optional<mans::h5::MansConfig> mans_cfg;
-    if (opts.filter_id == FILTER_ID_MANS) {
-        mans_cfg.emplace();
-        try {
-            mans_cfg->load(opts.mans_config_file);
-        } catch (const std::exception& e) {
-            if (mpi.rank == 0) {
-                std::cerr << RED << "Config Error: " << e.what() << RST << "\n";
-            }
-            return 1;
+    const std::size_t elem_size = sizeof(std::uint16_t);
+    mans::h5::data_gen::SyntheticConfig synth_cfg;
+    synth_cfg.size_mb = opts.dataset_mb;
+
+    const std::size_t total_elements = mans::h5::data_gen::aligned_total_elements(
+        synth_cfg.size_mb, elem_size, synth_cfg.block_size);
+
+    std::size_t rank_offset = 0;
+    std::size_t rank_count = 0;
+    split_even(total_elements, mpi.rank, mpi.ranks, rank_offset, rank_count);
+
+    const std::size_t chunk_elems = chunk_elements(opts.chunk_mb, elem_size, total_elements);
+
+    if (mpi.rank == 0) {
+        print_config(opts, total_elements, elem_size, chunk_elems, mpi.ranks, use_mpio);
+        if (opts.threads_from_user && opts.filter != FilterKind::Mans) {
+            std::cerr << YLW << "[WARN] --threads is ignored unless --filter mans" << RST << "\n";
         }
     }
 
-    std::uint32_t data_type = mans::DataType::U32;
-    if (mans_cfg.has_value()) {
-        data_type = mans_cfg->get_params().dtype;
+#if defined(H5_HAVE_PARALLEL)
+    MPI_Barrier(MPI_COMM_WORLD);
+#endif
+
+    if (mpi.rank == 0) {
+        std::cout << "[1/8] Generating data...\n";
     }
 
-    int rc = 0;
-    if (data_type == mans::DataType::U16) {
-        MpiTester<std::uint16_t> tester(mans_cfg ? &*mans_cfg : nullptr, H5T_NATIVE_UINT16, opts, mpi.rank, mpi.ranks);
-        rc = tester.run();
-    } else {
-        MpiTester<std::uint32_t> tester(mans_cfg ? &*mans_cfg : nullptr, H5T_NATIVE_UINT32, opts, mpi.rank, mpi.ranks);
-        rc = tester.run();
+    const auto data = mans::h5::data_gen::generate_synthetic_slice<std::uint16_t>(
+        DEFAULT_ADM_THRESHOLD,
+        synth_cfg,
+        total_elements,
+        rank_offset,
+        rank_count);
+
+#if defined(H5_HAVE_PARALLEL)
+    MPI_Barrier(MPI_COMM_WORLD);
+#endif
+
+    const mans::MansParams mans_params = build_mans_params(opts);
+
+    const double raw_bytes_total = static_cast<double>(total_elements) * elem_size;
+    const double raw_mb_total = mb_from_bytes(raw_bytes_total);
+    const double raw_mb_rank = raw_mb_total / static_cast<double>(mpi.ranks);
+
+    constexpr int kIters = 11;
+    TimingSums sums{};
+
+    MANS_TIMING_RESET();
+
+    for (int iter = 0; iter < kIters; ++iter) {
+        if (mpi.rank == 0) {
+            std::cout << "[" << (iter + 1) << "/" << kIters << "] Run";
+            if (iter == 0) {
+                std::cout << " (warmup)";
+            }
+            std::cout << "...\n";
+        }
+        {
+            const std::string iter_env = std::to_string(iter + 1);
+            setenv("MANS_TIMING_ITER", iter_env.c_str(), 1);
+        }
+
+        MANS_TIMING_RUN_SCOPE();
+        MANS_TIMING_SCOPE("hdf5/run_total");
+
+        std::uint64_t compressed_bytes = 0;
+        double write_s = write_hdf5(opts, mans_params, data,
+                                    total_elements, chunk_elems,
+                                    rank_offset, rank_count,
+                                    use_mpio,
+                                    compressed_bytes);
+
+#if defined(H5_HAVE_PARALLEL)
+        MPI_Barrier(MPI_COMM_WORLD);
+        MPI_Bcast(&compressed_bytes, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
+#endif
+
+        drop_cache_best_effort(opts.output_h5);
+
+#if defined(H5_HAVE_PARALLEL)
+        MPI_Barrier(MPI_COMM_WORLD);
+#endif
+
+        std::vector<std::uint16_t> recovered(rank_count);
+        double read_s = read_hdf5(opts, recovered, rank_offset, rank_count, use_mpio);
+
+#if defined(H5_HAVE_PARALLEL)
+        MPI_Barrier(MPI_COMM_WORLD);
+#endif
+
+        bool local_ok = true;
+        if (rank_count > 0) {
+            local_ok = (std::memcmp(data.data(), recovered.data(), rank_count * elem_size) == 0);
+        }
+
+#if defined(H5_HAVE_PARALLEL)
+        int ok_int = local_ok ? 1 : 0;
+        int global_ok = 0;
+        MPI_Allreduce(&ok_int, &global_ok, 1, MPI_INT, MPI_LAND, MPI_COMM_WORLD);
+        local_ok = (global_ok != 0);
+#endif
+
+        if (!local_ok) {
+            if (mpi.rank == 0) {
+                std::cerr << RED << "[ERROR] Data verification failed." << RST << "\n";
+            }
+            return 1;
+        }
+
+        if (iter == 0) {
+            continue;
+        }
+
+        double global_write_s = write_s;
+        double global_read_s = read_s;
+        double avg_write_s = write_s;
+        double avg_read_s = read_s;
+
+#if defined(H5_HAVE_PARALLEL)
+        MPI_Allreduce(&write_s, &global_write_s, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+        MPI_Allreduce(&read_s, &global_read_s, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+        MPI_Allreduce(&write_s, &avg_write_s, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        MPI_Allreduce(&read_s, &avg_read_s, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        avg_write_s /= static_cast<double>(mpi.ranks);
+        avg_read_s /= static_cast<double>(mpi.ranks);
+#endif
+
+        const double ratio = compressed_bytes > 0
+            ? (raw_bytes_total / static_cast<double>(compressed_bytes))
+            : 0.0;
+
+        sums.global_write_s += global_write_s;
+        sums.global_read_s += global_read_s;
+        sums.avg_write_s += avg_write_s;
+        sums.avg_read_s += avg_read_s;
+        sums.ratio += ratio;
+    }
+
+    if (mpi.rank == 0) {
+        const double denom = static_cast<double>(kIters - 1);
+        const double avg_global_write_s = sums.global_write_s / denom;
+        const double avg_global_read_s = sums.global_read_s / denom;
+        const double avg_rank_write_s = sums.avg_write_s / denom;
+        const double avg_rank_read_s = sums.avg_read_s / denom;
+        const double avg_ratio = sums.ratio / denom;
+
+        const double global_write_thr = avg_global_write_s > 0.0 ? (raw_mb_total / avg_global_write_s) : 0.0;
+        const double global_read_thr = avg_global_read_s > 0.0 ? (raw_mb_total / avg_global_read_s) : 0.0;
+        const double rank_write_thr = avg_rank_write_s > 0.0 ? (raw_mb_rank / avg_rank_write_s) : 0.0;
+        const double rank_read_thr = avg_rank_read_s > 0.0 ? (raw_mb_rank / avg_rank_read_s) : 0.0;
+
+        std::cout << "\n" << BOLD << "[Summary]" << RST << "\n";
+        std::cout << "  avg_ratio:            " << avg_ratio << "x\n";
+        std::cout << "  global_write_s:       " << avg_global_write_s
+                  << " (" << global_write_thr << " MB/s)\n";
+        std::cout << "  global_read_s:        " << avg_global_read_s
+                  << " (" << global_read_thr << " MB/s)\n";
+        std::cout << "  rank_avg_write_s:     " << avg_rank_write_s
+                  << " (" << rank_write_thr << " MB/s)\n";
+        std::cout << "  rank_avg_read_s:      " << avg_rank_read_s
+                  << " (" << rank_read_thr << " MB/s)\n";
+
+        MANS_TIMING_DUMP(TIMING_CSV_PATH);
+        std::cout << "  timing_csv:           " << GRN << TIMING_CSV_PATH << RST << "\n";
     }
 
     if (0 > H5close()) {
@@ -1051,8 +836,5 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (mpi.rank == 0) {
-        std::cout << "Done\n";
-    }
-    return rc;
+    return 0;
 }

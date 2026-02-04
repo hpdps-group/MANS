@@ -17,6 +17,7 @@
 #include <immintrin.h>
 #include <omp.h>
 #include "../../mans_defs.h"
+#include "../buffer_cache.h"
 
 #ifdef ENABLE_TIMING
 #include "../../mans_timing.h"
@@ -57,34 +58,27 @@ inline void compress_uint16(
     size_t& bit_signals_len,
     const mans::MansParams& params
 ) {
-
     int num_elements = (int)input_len;
     int gsize = (num_elements + cmp_tblock_size * cmp_chunk - 1) / (cmp_tblock_size * cmp_chunk);
     int total_threads = gsize * cmp_tblock_size;
-
-    std::unique_ptr<int, decltype(&free)> signal_length_local(nullptr, &free);
-    std::unique_ptr<int, decltype(&free)> bit_offsets_local(nullptr, &free);
-    std::unique_ptr<uint8_t, decltype(&free)> tmp_bit_signals_local(nullptr, &free);
+    int* signal_length = nullptr;
+    int* bit_offsets = nullptr;
+    uint8_t* tmp_bit_signals = nullptr;
 
     const int bytes_per_thread = cmp_chunk * max_bytes_signal_per_ele_16b;
-    const size_t tmp_bytes = static_cast<size_t>(total_threads) * bytes_per_thread;
-
-    {
-        MANS_TIMING_SCOPE("adm_alloc_scratch");
-        signal_length_local.reset(
-            static_cast<int*>(std::malloc(sizeof(int) * gsize)));
-        bit_offsets_local.reset(
-            static_cast<int*>(std::malloc(sizeof(int) * total_threads)));
-        tmp_bit_signals_local.reset(
-            static_cast<uint8_t*>(std::malloc(tmp_bytes)));
-    }
-    if (!signal_length_local || !bit_offsets_local || !tmp_bit_signals_local) {
+    const size_t tmp_bytes = static_cast<size_t>(total_threads) * bytes_per_thread;    
+    auto& cache = mans::cpu::BufferCache::instance();
+    signal_length = cache.get_t<int>("adm_u16_signal_length", static_cast<std::size_t>(gsize));
+    bit_offsets = cache.get_t<int>("adm_u16_bit_offsets", static_cast<std::size_t>(total_threads));
+    tmp_bit_signals = cache.get_t<uint8_t>("adm_u16_tmp_bit_signals", tmp_bytes);
+    if (!signal_length || !bit_offsets || !tmp_bit_signals) {
         std::cerr << "Failed to allocate ADM scratch buffers.\n";
         return;
     }
-    int* signal_length = signal_length_local.get();
-    int* bit_offsets = bit_offsets_local.get();
-    uint8_t* tmp_bit_signals = tmp_bit_signals_local.get();
+
+
+    {
+        MANS_TIMING_SCOPE("adm/compress/center_calc");
     // Center calculation: parallelizing and reducing unnecessary work
     #pragma omp parallel for num_threads(params.adm_center_calc_threads)
     for (int warp = 0; warp < gsize; ++warp) {
@@ -99,8 +93,10 @@ inline void compress_uint16(
         int count = end_idx - base_idx;
         centers[warp] = (count > 0) ? sum / count : 0;
     }
+    }
 
-
+    {
+        MANS_TIMING_SCOPE("adm/compress/encode");
     // Encoding and setting codes, bit_signals (in temporary space)
     #pragma omp parallel for num_threads(params.adm_encode_threads)
     for (int thread_idx = 0; thread_idx < total_threads; ++thread_idx) {
@@ -134,7 +130,10 @@ inline void compress_uint16(
 
         bit_offsets[thread_idx] = bit_offset;
     }
+    }
 
+    {
+        MANS_TIMING_SCOPE("adm/compress/warp_reduce");
     // Warp-level reduction: compute signal_length[warp] deterministically
     #pragma omp parallel for num_threads(params.adm_warp_reduce_threads)
     for (int warp = 0; warp < gsize; ++warp) {
@@ -150,7 +149,10 @@ inline void compress_uint16(
 
         signal_length[warp] = max_len_bytes;
     }
+    }
 
+    {
+        MANS_TIMING_SCOPE("adm/compress/fill_tail");
     // Fill in the tail bits
     #pragma omp parallel for num_threads(params.adm_fill_tail_threads)
     for (int thread_idx = 0; thread_idx < total_threads; ++thread_idx) {
@@ -165,17 +167,23 @@ inline void compress_uint16(
             bit_out[byte_idx] |= mask;
         }
     }
+    }
 
+    {
+        MANS_TIMING_SCOPE("adm/compress/prefix_sum");
     // Compute prefix sum (serially)
     output_lengths[0] = 0;
     for (int i = 1; i <= gsize; ++i) {
         output_lengths[i] = output_lengths[i - 1] + signal_length[i - 1];
+    }
     }
 
     // Write back bit_signals
     int total_bit_bytes = output_lengths[gsize] * cmp_tblock_size;
     bit_signals_len = static_cast<size_t>(total_bit_bytes);
 
+    {
+        MANS_TIMING_SCOPE("adm/compress/write_back");
     #pragma omp parallel for num_threads(params.adm_write_back_threads)
     for (int thread_idx = 0; thread_idx < total_threads; ++thread_idx) {
         int warp = thread_idx / cmp_tblock_size;
@@ -191,6 +199,7 @@ inline void compress_uint16(
         for (int i = 0; i < bit_len; ++i) {
             bit_signals[dst_base + i] = src[i];
         }
+    }
     }
 }
 
@@ -208,18 +217,20 @@ inline void decompress_uint16(
     int total_threads = gsize * cmp_tblock_size;
 
     // Step 1: Restore signal[]
-    std::unique_ptr<uint8_t, decltype(&free)> signals_local(nullptr, &free);
+    uint8_t* signals = nullptr;
 
     {
         MANS_TIMING_SCOPE("adm_alloc_scratch");
-        signals_local.reset(static_cast<uint8_t*>(std::malloc(num_elements)));
+        signals = mans::cpu::BufferCache::instance().get_t<uint8_t>(
+            "adm_u16_signals", num_elements);
     }
-    if (!signals_local) {
+    if (!signals) {
         std::cerr << "Failed to allocate ADM scratch buffer.\n";
         return;
     }
-    uint8_t* signals = signals_local.get();
 
+    {
+        MANS_TIMING_SCOPE("adm/decompress/restore_signals");
     #pragma omp parallel for num_threads(params.adm_restore_signals_threads)
     for (int tid = 0; tid < total_threads; ++tid) {
         int warp = tid / cmp_tblock_size;
@@ -257,7 +268,10 @@ inline void decompress_uint16(
             signals[dst_start_idx + i] = local_signal[i];
         }
     }
+    }
 
+    {
+        MANS_TIMING_SCOPE("adm/decompress/decode_values");
     #pragma omp parallel for num_threads(params.adm_decode_values_threads)
     for (int tid = 0; tid < total_threads; ++tid) {
         int block_id = tid;
@@ -281,6 +295,7 @@ inline void decompress_uint16(
             output_data[base_idx + i] = val;
         }
     }
+    }
 }
 
 inline void compress_uint32(
@@ -297,29 +312,24 @@ inline void compress_uint32(
     int gsize = (num_elements + cmp_tblock_size * cmp_chunk - 1) / (cmp_tblock_size * cmp_chunk);
     int total_threads = gsize * cmp_tblock_size;
 
-    std::unique_ptr<int, decltype(&free)> signal_length_local(nullptr, &free);
-    std::unique_ptr<int, decltype(&free)> bit_offsets_local(nullptr, &free);
-    std::unique_ptr<uint8_t, decltype(&free)> tmp_bit_signals_local(nullptr, &free);
+    int* signal_length = nullptr;
+    int* bit_offsets = nullptr;
+    uint8_t* tmp_bit_signals = nullptr;
 
     const int bytes_per_thread = cmp_chunk * max_bytes_signal_per_ele_32b;
     const size_t tmp_bytes = static_cast<size_t>(total_threads) * bytes_per_thread;
 
     {
         MANS_TIMING_SCOPE("adm_alloc_scratch");
-        signal_length_local.reset(
-            static_cast<int*>(std::malloc(sizeof(int) * gsize)));
-        bit_offsets_local.reset(
-            static_cast<int*>(std::malloc(sizeof(int) * total_threads)));
-        tmp_bit_signals_local.reset(
-            static_cast<uint8_t*>(std::malloc(tmp_bytes)));
+        auto& cache = mans::cpu::BufferCache::instance();
+        signal_length = cache.get_t<int>("adm_u32_signal_length", static_cast<std::size_t>(gsize));
+        bit_offsets = cache.get_t<int>("adm_u32_bit_offsets", static_cast<std::size_t>(total_threads));
+        tmp_bit_signals = cache.get_t<uint8_t>("adm_u32_tmp_bit_signals", tmp_bytes);
     }
-    if (!signal_length_local || !bit_offsets_local || !tmp_bit_signals_local) {
+    if (!signal_length || !bit_offsets || !tmp_bit_signals) {
         std::cerr << "Failed to allocate ADM scratch buffers.\n";
         return;
     }
-    int* signal_length = signal_length_local.get();
-    int* bit_offsets = bit_offsets_local.get();
-    uint8_t* tmp_bit_signals = tmp_bit_signals_local.get();
 
     // static const uint8_t bitmask[8] = {0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01};
     // static const uint8_t tail_mask[8] = {0xFF, 0x7F, 0x3F, 0x1F, 0x0F, 0x07, 0x03, 0x01};
@@ -449,16 +459,18 @@ inline void decompress_uint32(
     int total_threads = gsize * cmp_tblock_size;
 
     // Step 1: Restore signal[]
-    std::unique_ptr<uint8_t, decltype(&free)> signals_local(nullptr, &free);
+    uint8_t* signals = nullptr;
 
     MANS_TIMING_SCOPE("adm_alloc_scratch");
-    signals_local.reset(static_cast<uint8_t*>(std::malloc(num_elements)));
-    if (!signals_local) {
+    signals = mans::cpu::BufferCache::instance().get_t<uint8_t>(
+        "adm_u32_signals", num_elements);
+    if (!signals) {
         std::cerr << "Failed to allocate ADM scratch buffer.\n";
         return;
     }
-    uint8_t* signals = signals_local.get();
 
+    {
+        MANS_TIMING_SCOPE("adm/decompress/restore_signals");
     #pragma omp parallel for num_threads(params.adm_restore_signals_threads)
     for (int tid = 0; tid < total_threads; ++tid) {
         int warp = tid / cmp_tblock_size;
@@ -496,9 +508,11 @@ inline void decompress_uint32(
             signals[dst_start_idx + i] = local_signal[i];
         }
     }
+    }
 
     // Step 2: Decode values
-
+    {
+        MANS_TIMING_SCOPE("adm/decompress/decode_values");
     #pragma omp parallel for num_threads(params.adm_decode_values_threads)
     for (int tid = 0; tid < total_threads; ++tid) {
         int block_id = tid;
@@ -520,6 +534,7 @@ inline void decompress_uint32(
 
             uint32_t val = (code % 2 == 1) ? center - diff : center + diff;
             output_data[base_idx + i] = val;
+        }
         }
     }
 }

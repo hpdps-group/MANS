@@ -11,6 +11,7 @@
 #include "adm/adm_utils.h"
 #include "pans/pans_utils.h"
 #include "file_utils.h"
+#include "buffer_cache.h"
 #include "../mans_timing.h"
 #define DEBUG_PRINT(msg) \
     std::cerr << "\033[1;35m[PLUGIN-CORE]\033[0m " << msg << "\n"
@@ -125,7 +126,6 @@ void do_compress_t(
 
 
     std::uint8_t* mans_intermediate_buf_local = nullptr;
-    std::unique_ptr<std::uint8_t, decltype(&free)> mans_intermediate_owned(nullptr, &free);
     std::size_t adm_cap = 0;
 
     // simple conservative bounds
@@ -136,24 +136,18 @@ void do_compress_t(
         if (use_adm) {
             codec_code = 1; // ADM
             adm_cap = adm_max_compressed_size<T>(length);
-            {
-                MANS_TIMING_SCOPE("alloc_adm_buf");
-                mans_intermediate_owned.reset(
-                    static_cast<std::uint8_t*>(std::malloc(adm_cap)));
-            }
-            if (!mans_intermediate_owned) {
+            mans_intermediate_buf_local =
+                mans::cpu::BufferCache::instance().get_t<std::uint8_t>(
+                    "mans_adm_intermediate", adm_cap);
+            if (!mans_intermediate_buf_local) {
                 std::cerr << "[Error] Out of memory during alloc_adm_buf.\n";
                 return;
             }
-            mans_intermediate_buf_local = mans_intermediate_owned.get();
-
             std::size_t adm_size = 0;
-
             {
                 MANS_TIMING_SCOPE("adm_compress");
                 adm_compress<T>(data_ptr, length, mans_intermediate_buf_local, adm_size, params);
             }
-
             if (adm_size > adm_cap) {
                 std::cerr << "[Error] adm_buf overflow: adm_size > adm_cap.\n";
                 return;
@@ -219,22 +213,21 @@ void do_decompress_t(
     size_t payload_len = length - 1;
 
     std::uint8_t* mans_intermediate_buf_local = nullptr;
-    std::unique_ptr<std::uint8_t, decltype(&free)> mans_intermediate_owned(nullptr, &free);
 
     try {
         std::size_t pans_decomp_len = 0;
         get_compress_and_decompressed_len(payload_ptr,payload_len,pans_decomp_len);
         {
             MANS_TIMING_SCOPE("alloc_pans_decomp_buf");
-            mans_intermediate_owned.reset(
-                static_cast<std::uint8_t*>(std::malloc(pans_decomp_len)));
+            mans_intermediate_buf_local =
+                mans::cpu::BufferCache::instance().get_t<std::uint8_t>(
+                    "mans_pans_decomp", pans_decomp_len);
         }
-        if (!mans_intermediate_owned) {
+        if (!mans_intermediate_buf_local) {
             std::cerr << "[Error] Out of memory.\n";
             final_out_size = 0;
             return;
         }
-        mans_intermediate_buf_local = mans_intermediate_owned.get();
         double pans_dur = 0.0;
 
         {

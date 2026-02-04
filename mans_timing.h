@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <iostream>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -51,7 +52,33 @@ public:
         stats.max_ms = std::max(stats.max_ms, ms);
     }
 
+    void start(const char* name) {
+        auto& active = active_timers();
+        const auto now = std::chrono::steady_clock::now();
+        auto it = active.find(name);
+        if (it != active.end()) {
+            std::cerr << "Timing start called twice without stop: " << name << "\n";
+            it->second = now;
+            return;
+        }
+        active.emplace(name, now);
+    }
+
+    void stop(const char* name) {
+        auto& active = active_timers();
+        auto it = active.find(name);
+        if (it == active.end()) {
+            std::cerr << "Timing stop without start: " << name << "\n";
+            return;
+        }
+        const auto end = std::chrono::steady_clock::now();
+        const auto ms = std::chrono::duration<double, std::milli>(end - it->second).count();
+        active.erase(it);
+        add(name, ms);
+    }
+
     void dump_csv(const std::string& path) const {
+        warn_unfinished_timers();
         std::ofstream out(path);
         if (!out) {
             return;
@@ -70,14 +97,20 @@ public:
             }
         }
         std::sort(keys.begin(), keys.end());
-        const auto total_it = std::find(keys.begin(), keys.end(), "total");
-        if (total_it != keys.end()) {
-            const std::string total_key = *total_it;
-            keys.erase(total_it);
-            keys.insert(keys.begin(), total_key);
+        const std::vector<std::string> priority_keys = {
+            "adm/compress_total",
+            "adm/decompress_total"
+        };
+        for (auto it = priority_keys.rbegin(); it != priority_keys.rend(); ++it) {
+            const auto key_it = std::find(keys.begin(), keys.end(), *it);
+            if (key_it != keys.end()) {
+                const std::string key = *key_it;
+                keys.erase(key_it);
+                keys.insert(keys.begin(), key);
+            }
         }
 
-        out << "run_index,sum_total_ms";
+        out << "run_index";
         for (const auto& key : keys) {
             out << "," << key << "_total_ms"
                 << "," << key << "_count"
@@ -87,9 +120,8 @@ public:
 
         for (std::size_t i = 0; i < runs_.size(); ++i) {
             const auto& stats = runs_[i].stats;
-            const double sum_total_ms = sum_all_ms(stats);
 
-            out << (i + 1) << "," << sum_total_ms;
+            out << (i + 1);
             for (const auto& key : keys) {
                 const auto s = get_stats(stats, key.c_str());
                 out << "," << s.total_ms
@@ -186,6 +218,22 @@ private:
         return count ? (total_ms / static_cast<double>(count)) : 0.0;
     }
 
+    static std::unordered_map<std::string, std::chrono::steady_clock::time_point>&
+    active_timers() {
+        thread_local std::unordered_map<std::string, std::chrono::steady_clock::time_point> active;
+        return active;
+    }
+
+    static void warn_unfinished_timers() {
+        auto& active = active_timers();
+        if (active.empty()) {
+            return;
+        }
+        for (const auto& kv : active) {
+            std::cerr << "Timing stop missing for: " << kv.first << "\n";
+        }
+    }
+
     std::vector<RunData> runs_;
     std::unordered_map<std::string, TimingStats>* current_ = nullptr;
 };
@@ -222,6 +270,8 @@ public:
 } // namespace mans
 
 #define MANS_TIMING_SCOPE(name) mans::ScopedTimer _mans_timer_##__LINE__(name)
+#define MANS_TIMING_START(name) mans::TimingCollector::instance().start(name)
+#define MANS_TIMING_STOP(name) mans::TimingCollector::instance().stop(name)
 #define MANS_TIMING_DUMP(path) mans::TimingCollector::instance().dump_csv(path)
 #define MANS_TIMING_RUN_SCOPE() mans::RunScope _mans_run_##__LINE__{}
 #define MANS_TIMING_RESET() mans::TimingCollector::instance().reset()
@@ -229,6 +279,8 @@ public:
 #else
 
 #define MANS_TIMING_SCOPE(name) do {} while (0)
+#define MANS_TIMING_START(name) do {} while (0)
+#define MANS_TIMING_STOP(name) do {} while (0)
 #define MANS_TIMING_DUMP(path) do {} while (0)
 #define MANS_TIMING_RUN_SCOPE() do {} while (0)
 #define MANS_TIMING_RESET() do {} while (0)

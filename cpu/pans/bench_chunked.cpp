@@ -1,5 +1,6 @@
 #include "pans_utils.h"
 #include "CpuANSUtils.h"
+#include "../../mans_timing.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -81,15 +82,18 @@ RunStats run_once(const std::vector<std::uint8_t>& input, std::size_t chunk_byte
         std::vector<std::uint8_t> out(max_out);
         std::size_t out_len = 0;
         double comp_ms = 0.0;
-
+        MANS_TIMING_START("pans/compress");
         pans_compress(in_ptr, len, out.data(), out_len, comp_ms);
+        MANS_TIMING_STOP("pans/compress");
         stats.comp_ms += comp_ms;
         stats.comp_bytes += out_len;
 
         std::vector<std::uint8_t> decomp(len);
         std::size_t decomp_len = 0;
         double decomp_ms = 0.0;
+        MANS_TIMING_START("pans/decompress");
         pans_decompress(out.data(), out_len, decomp.data(), decomp_len, decomp_ms);
+        MANS_TIMING_STOP("pans/decompress");
         stats.decomp_ms += decomp_ms;
 
         if (decomp_len != len) {
@@ -188,7 +192,9 @@ int main(int argc, char** argv) {
         double total_comp_bytes = 0.0;
         bool all_ok = true;
 
+        MANS_TIMING_RESET();
         for (int iter = 0; iter < kIters; ++iter) {
+            MANS_TIMING_RUN_SCOPE();
             RunStats stats = run_once(input, chunk_bytes);
             if (!stats.ok) {
                 all_ok = false;
@@ -233,6 +239,13 @@ int main(int argc, char** argv) {
                 << std::fixed << std::setprecision(2) << ratio << ","
                 << std::fixed << std::setprecision(1) << comp_mbps << ","
                 << std::fixed << std::setprecision(1) << decomp_mbps << "\n";
+        }
+
+        MANS_TIMING_DUMP("pans_timing.csv");
+        static bool timing_path_logged = false;
+        if (!timing_path_logged) {
+            timing_path_logged = true;
+            std::cerr << "Timing CSV path: pans_timing.csv\n";
         }
     }
 

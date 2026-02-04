@@ -119,6 +119,16 @@ if(BUILD_CPU)
   target_compile_options(cpu_mans_bench PRIVATE $<$<CONFIG:Release>:-O3>)
   target_link_libraries(cpu_mans_bench PRIVATE mans_cpu_core OpenMP::OpenMP_CXX)
 
+  # mans autotune：build/cpu/cpu_mans_autotune
+  add_executable(cpu_mans_autotune
+    cpu/cpu_mans_autotune.cpp
+  )
+  set_target_properties(cpu_mans_autotune PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY ${cpu_root_binary_dir}
+  )
+  target_compile_options(cpu_mans_autotune PRIVATE $<$<CONFIG:Release>:-O3>)
+  target_link_libraries(cpu_mans_autotune PRIVATE mans_cpu_core OpenMP::OpenMP_CXX)
+
   # ========== MPI Benchmarks ==========
   find_package(MPI REQUIRED)
   add_executable(cpu_mans_mpi_bench

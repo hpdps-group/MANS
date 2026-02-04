@@ -1,10 +1,13 @@
 #pragma once
 
-#include <iostream>
+#include <cstdlib>
 #include <fstream>
+#include <iostream>
+#include <limits>
+#include <map>
+#include <sstream>
 #include <string>
 #include <vector>
-#include <map>
 #include <cstring>
 #include <stdexcept>
 #include <algorithm>
@@ -145,6 +148,14 @@ private:
         return str.substr(first, (last - first + 1));
     }
 };
+
+inline void* safe_malloc(std::size_t size) {
+    void* ptr = std::malloc(size);
+    if (!ptr) {
+        std::cerr << "[H5Z-MANS Error] Memory allocation failed for size: " << size << "\n";
+    }
+    return ptr;
+}
 
 } // namespace h5
 } // namespace mans
