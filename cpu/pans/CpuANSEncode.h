@@ -284,6 +284,59 @@ void ansHistogram_v3(
     memcpy(out, temp, 256*4);
 }
 
+void ansHistogram_v4(
+    const uint8_t* in,
+    uint32_t size,
+    uint32_t* out,
+    bool multithread=true) {
+    std::memset(out, 0, kNumSymbols * sizeof(uint32_t));
+    if (size == 0) {
+        return;
+    }
+
+    // const unsigned numThreads = omp_get_max_threads();
+    const unsigned numThreads =32;
+    // if (size < 45u * 100000u || !multithread || numThreads <= 1) {
+    //     alignas(64) uint32_t localHist[kNumSymbols] = {0};
+    //     processBlock_v1(in, size, localHist);
+    //     for (int i = 0; i < static_cast<int>(kNumSymbols); ++i) {
+    //         out[i] += localHist[i];
+    //     }
+    //     return;
+    // }
+
+    constexpr unsigned kLanesPerThread = 1;
+    const unsigned laneCount = numThreads * kLanesPerThread;
+    alignas(64) std::vector<uint32_t> histograms(laneCount * kNumSymbols, 0);
+    const uint32_t blockSize = (size + laneCount * 4 - 1) / (laneCount * 4);
+    const uint32_t numBlocks = (size + blockSize - 1) / blockSize;
+
+    omp_set_num_threads(static_cast<int>(numThreads));
+    #pragma omp parallel num_threads(numThreads)
+    {
+        const unsigned tid = static_cast<unsigned>(omp_get_thread_num());
+        uint32_t* threadBase =
+            &histograms[static_cast<size_t>(tid) * kLanesPerThread * kNumSymbols];
+        #pragma omp for schedule(dynamic, 1)
+        for (uint32_t blockIdx = 0; blockIdx < numBlocks; ++blockIdx) {
+            const unsigned lane = blockIdx % kLanesPerThread;
+            uint32_t* localHist = threadBase + lane * kNumSymbols;
+            uint32_t start = blockIdx * blockSize;
+            uint32_t end = std::min(start + blockSize, size);
+            processBlock_v1(in + start, end - start, localHist);
+        }
+    }
+
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < static_cast<int>(kNumSymbols); ++i) {
+        uint32_t sum = 0;
+        for (unsigned lane = 0; lane < laneCount; ++lane) {
+            sum += histograms[static_cast<size_t>(lane) * kNumSymbols + i];
+        }
+        out[i] = sum;
+    }
+}
+
 template <int one_bits, int kStateCheckMul>
 void ansCalcWeights(
     int probBits,
@@ -867,20 +920,25 @@ void ansEncode(
   // printf("maxNumCompressedBlocks:%d\n",maxNumCompressedBlocks);
   header.setTotalUncompressedWords(inSize);
   // printf("uncompressedWords:%d\n",uncompressedWords);
-
+    
 //   auto start = std::chrono::high_resolution_clock::now();
   if(inSize > 2621440 * 2){
-  ansHistogram_v1(
+    MANS_TIMING_START("pans/histogram1");
+    ansHistogram_v4(
       in,
       inSize,
       tempHistogram);
+    MANS_TIMING_STOP("pans/histogram1");
   }
   else{
-  ansHistogram_v2(
+    MANS_TIMING_START("pans/histogram2");
+  ansHistogram_v4(
       in,
       inSize,
       tempHistogram);
+    MANS_TIMING_STOP("pans/histogram2");
   }
+  
 //   auto end = std::chrono::high_resolution_clock::now();
 //   double histgram_time = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1e3;
 //   printf("little histgram_time: %f\n", histgram_time);

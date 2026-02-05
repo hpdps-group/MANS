@@ -129,21 +129,7 @@ if(BUILD_CPU)
   target_compile_options(cpu_mans_autotune PRIVATE $<$<CONFIG:Release>:-O3>)
   target_link_libraries(cpu_mans_autotune PRIVATE mans_cpu_core OpenMP::OpenMP_CXX)
 
-  # ========== MPI Benchmarks ==========
-  find_package(MPI REQUIRED)
-  add_executable(cpu_mans_mpi_bench
-    cpu/cpu_mans_mpi_bench.cpp
-  )
-  set_target_properties(cpu_mans_mpi_bench PROPERTIES
-      RUNTIME_OUTPUT_DIRECTORY ${cpu_root_binary_dir}
-  )
-  target_compile_options(cpu_mans_mpi_bench PRIVATE $<$<CONFIG:Release>:-O3>)
-  target_include_directories(cpu_mans_mpi_bench PRIVATE
-      ${CMAKE_SOURCE_DIR}
-      ${CMAKE_SOURCE_DIR}/tools/H5Z-MANS/include
-  )
-  target_link_libraries(cpu_mans_mpi_bench PRIVATE mans_common MPI::MPI_CXX OpenMP::OpenMP_CXX)
-
+  
   # ========== CPU / pans submodule ==========
   set(cpu_pans_binary_dir ${cpu_root_binary_dir}/pans)
   set(CPU_PANS_BINARY_DIR ${cpu_pans_binary_dir})
