@@ -28,7 +28,7 @@
 #endif
 
 // Filter IDs
-#define FILTER_ID_NONE    0
+#define FILTER_ID_NONE    32002
 #define FILTER_ID_DEFLATE 1
 #define FILTER_ID_ZSTD    32015
 #define FILTER_ID_MANS    32001
@@ -318,6 +318,11 @@ static void configure_filter(hid_t dcpl,
     CHECK_H5(H5Pset_chunk(dcpl, 1, chunk));
 
     if (opts.filter == FilterKind::None) {
+        const htri_t avail = H5Zfilter_avail(FILTER_ID_NONE);
+        if (!avail) {
+            throw std::runtime_error("H5Z-NONE filter not available");
+        }
+        CHECK_H5(H5Pset_filter(dcpl, FILTER_ID_NONE, 0, 0, nullptr));
         return;
     }
 
@@ -479,7 +484,9 @@ static double write_hdf5(const Options& opts,
             MANS_TIMING_SCOPE("hdf5/write");
             CHECK_H5(H5Dwrite(dset, H5T_NATIVE_UINT16, mspace, fspace, dxpl, local_data.data()));
             CHECK_H5(H5Fflush(file, H5F_SCOPE_GLOBAL));
+            MANS_TIMING_START("hdf5/sync");
             sync_file(file, use_mpio);
+            MANS_TIMING_STOP("hdf5/sync");
         }
         auto t1 = std::chrono::steady_clock::now();
 
@@ -506,7 +513,9 @@ static double write_hdf5(const Options& opts,
         MANS_TIMING_SCOPE("hdf5/write");
         CHECK_H5(H5Dwrite(dset, H5T_NATIVE_UINT16, mspace, fspace, dxpl, &dummy));
         CHECK_H5(H5Fflush(file, H5F_SCOPE_GLOBAL));
+        MANS_TIMING_START("hdf5/sync");
         sync_file(file, use_mpio);
+        MANS_TIMING_STOP("hdf5/sync");
     }
     auto t1 = std::chrono::steady_clock::now();
 

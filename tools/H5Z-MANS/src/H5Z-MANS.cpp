@@ -44,7 +44,9 @@ void maybe_begin_run_from_env() {
     int prev = g_timing_iter_seen.load(std::memory_order_relaxed);
     if (iter != prev &&
         g_timing_iter_seen.compare_exchange_strong(prev, iter, std::memory_order_relaxed)) {
+        #ifdef ENABLE_TIMING
         mans::TimingCollector::instance().begin_run();
+        #endif
     }
 }
 

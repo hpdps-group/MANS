@@ -27,6 +27,17 @@ set_target_properties(H5Z-MANS PROPERTIES
     PREFIX "lib"
 )
 
+# =========================================================
+# Target 1b: H5Z-NONE (Pass-through Filter Plugin)
+# =========================================================
+add_library(H5Z-NONE SHARED src/H5Z-NONE.cpp)
+target_link_libraries(H5Z-NONE PRIVATE ${HDF5_LIBRARIES} $<$<BOOL:${HDF5_PREFER_PARALLEL}>:MPI::MPI_C>)
+set_target_properties(H5Z-NONE PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/plugins
+    OUTPUT_NAME "H5Z-NONE"
+    PREFIX "lib"
+)
+
 
 # =========================================================
 # Target 2: H5Z-MANS_test
