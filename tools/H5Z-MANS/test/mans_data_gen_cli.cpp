@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -32,7 +33,7 @@ static void print_usage(const char* prog) {
     std::cerr
         << "Usage:\n  " << prog
         << " [--config gen.cfg] [--output-name name.bin] [--output-dir DIR] [--output-prefix NAME]\n"
-           "         [--synth-config synth.cfg] [--size-per-rank MB] [--ranks N] [--jobs N]\n"
+           "         [--synth-config synth.cfg] [--size-per-rank-mb MB] [--ranks N] [--jobs N]\n"
            "         [--dtype u16|u32] [--adm-threshold N]\n";
 }
 
@@ -78,8 +79,8 @@ static std::optional<GenOptions> parse_args(int argc, char** argv) {
             opts.synth_config_file = need_value("--synth-config");
             continue;
         }
-        if (arg == "--size-per-rank") {
-            opts.size_per_rank_mb_override = std::stod(need_value("--size-per-rank"));
+        if (arg == "--size-per-rank-mb") {
+            opts.size_per_rank_mb_override = std::stod(need_value("--size-per-rank-mb"));
             continue;
         }
         if (arg == "--ranks") {
@@ -126,7 +127,7 @@ static int generate_and_write(const mans::h5::data_gen::SyntheticConfig& cfg,
                               const std::string& output_path) {
     const std::size_t elem_size = sizeof(T);
     const std::size_t total_elements = mans::h5::data_gen::aligned_total_elements(
-        cfg.size_mb,
+        cfg.size_per_rank_mb,
         elem_size,
         cfg.block_size);
 
@@ -201,6 +202,7 @@ int main(int argc, char** argv) {
     }
 
     mans::h5::data_gen::GeneratorConfig gen_cfg;
+    const bool use_builtin_defaults = opts.config_file.empty() && opts.synth_config_file.empty();
     try {
         if (!opts.config_file.empty()) {
             gen_cfg = mans::h5::data_gen::load_generator_config(opts.config_file);
@@ -213,10 +215,10 @@ int main(int argc, char** argv) {
     }
 
     if (opts.size_per_rank_mb_override.has_value()) {
-        gen_cfg.synth.size_mb = *opts.size_per_rank_mb_override;
+        gen_cfg.synth.size_per_rank_mb = *opts.size_per_rank_mb_override;
     }
-    if (gen_cfg.synth.size_mb <= 0.0) {
-        gen_cfg.synth.size_mb = 256.0;
+    if (gen_cfg.synth.size_per_rank_mb <= 0.0) {
+        gen_cfg.synth.size_per_rank_mb = 256.0;
     }
 
     std::uint32_t dtype = gen_cfg.dtype;
@@ -227,6 +229,16 @@ int main(int argc, char** argv) {
     }
     if (opts.adm_threshold_override.has_value()) {
         adm_threshold = *opts.adm_threshold_override;
+    }
+
+    if (use_builtin_defaults) {
+        // Keep default synthetic output ADM-friendly for decide_use_adm().
+        gen_cfg.synth.ratio_smooth = 1.0;
+        gen_cfg.synth.ratio_spike = 0.0;
+        gen_cfg.synth.ratio_random = 0.0;
+        gen_cfg.synth.block_size = 512;
+        const auto safe_noise = std::min<std::uint32_t>(adm_threshold, 20U);
+        gen_cfg.synth.noise_range = static_cast<int>(safe_noise);
     }
 
     const std::size_t ranks = opts.ranks_override.value_or(1);

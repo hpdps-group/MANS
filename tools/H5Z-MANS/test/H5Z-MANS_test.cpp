@@ -673,10 +673,10 @@ int main(int argc, char** argv) {
 
     const std::size_t elem_size = sizeof(std::uint16_t);
     mans::h5::data_gen::SyntheticConfig synth_cfg;
-    synth_cfg.size_mb = opts.dataset_mb;
+    synth_cfg.size_per_rank_mb = opts.dataset_mb;
 
     const std::size_t total_elements = mans::h5::data_gen::aligned_total_elements(
-        synth_cfg.size_mb, elem_size, synth_cfg.block_size);
+        synth_cfg.size_per_rank_mb, elem_size, synth_cfg.block_size);
 
     std::size_t rank_offset = 0;
     std::size_t rank_count = 0;

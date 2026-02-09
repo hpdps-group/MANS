@@ -24,7 +24,7 @@ namespace mans::data_gen {
 namespace fs = std::filesystem;
 
 struct SyntheticConfig {
-    double size_mb = 256.0;
+    double size_per_rank_mb = 256.0;
     double ratio_smooth = 1.0;
     double ratio_spike = 0.0;
     double ratio_random = 0.0;
@@ -57,8 +57,8 @@ inline std::string trim_copy(const std::string& str) {
 }
 
 inline void apply_config_kv(SyntheticConfig& cfg, const std::string& key, const std::string& val) {
-    if (key == "size_mb") {
-        cfg.size_mb = std::stod(val);
+    if (key == "size-per-rank-mb") {
+        cfg.size_per_rank_mb = std::stod(val);
         return;
     }
     if (key == "ratio_smooth") {
@@ -190,11 +190,11 @@ inline GeneratorConfig load_generator_config(const std::string& path) {
     return cfg;
 }
 
-inline std::size_t aligned_total_elements(double size_mb, std::size_t elem_size, std::size_t block_size) {
+inline std::size_t aligned_total_elements(double size_per_rank_mb, std::size_t elem_size, std::size_t block_size) {
     if (elem_size == 0) {
         throw std::runtime_error("Element size cannot be 0");
     }
-    const auto total_bytes = static_cast<std::size_t>(size_mb * 1024.0 * 1024.0);
+    const auto total_bytes = static_cast<std::size_t>(size_per_rank_mb * 1024.0 * 1024.0);
     auto elements = total_bytes / elem_size;
     if (elements == 0) {
         elements = block_size;
@@ -290,7 +290,11 @@ inline std::vector<T> generate_synthetic_slice(std::uint32_t adm_threshold,
         const auto block_seed = cfg.seed + static_cast<std::uint64_t>(block * 1315423911ULL);
         std::mt19937_64 rng(block_seed);
         std::discrete_distribution<int> type_dist(weights.begin(), weights.end());
-        std::uniform_int_distribution<int> noise_dist(0, std::max(0, cfg.noise_range));
+        const int max_noise = std::max(0, cfg.noise_range);
+        const int threshold_limited_noise = (adm_threshold > static_cast<std::uint32_t>(std::numeric_limits<int>::max()))
+            ? max_noise
+            : std::min(max_noise, static_cast<int>(adm_threshold));
+        std::uniform_int_distribution<int> noise_dist(0, threshold_limited_noise);
         std::uniform_int_distribution<unsigned long long> full_range_dist(0, max_val);
 
         const int block_type = type_dist(rng);
@@ -301,7 +305,7 @@ inline std::vector<T> generate_synthetic_slice(std::uint32_t adm_threshold,
 
             if (block_type == 0) {
                 const int noise = noise_dist(rng);
-                if (block_base > (max_val - static_cast<T>(std::max(0, cfg.noise_range)))) {
+                if (block_base > (max_val - static_cast<T>(threshold_limited_noise))) {
                     out[local_idx] = static_cast<T>(block_base - static_cast<T>(noise));
                 } else {
                     out[local_idx] = static_cast<T>(block_base + static_cast<T>(noise));
@@ -366,15 +370,15 @@ inline std::vector<RankDatasetInfo> generate_rank_datasets(std::uint32_t adm_thr
     if (rank_count == 0) {
         throw std::runtime_error("rank_count must be >= 1");
     }
-    if (cfg.size_mb <= 0.0) {
-        throw std::runtime_error("Synthetic size_mb must be > 0");
+    if (cfg.size_per_rank_mb <= 0.0) {
+        throw std::runtime_error("Synthetic size-per-rank-mb must be > 0");
     }
     if (cfg.block_size == 0) {
         throw std::runtime_error("Synthetic block_size cannot be 0");
     }
 
     fs::create_directories(output_dir);
-    const std::size_t elements = aligned_total_elements(cfg.size_mb, sizeof(T), cfg.block_size);
+    const std::size_t elements = aligned_total_elements(cfg.size_per_rank_mb, sizeof(T), cfg.block_size);
 
     std::vector<RankDatasetInfo> outputs(rank_count);
     for (std::size_t rank = 0; rank < rank_count; ++rank) {

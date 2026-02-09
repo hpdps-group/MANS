@@ -520,9 +520,9 @@ int main(int argc, char** argv) {
     std::cout << "Best CSV: " << out_path << "\n\n";
 
     mans::data_gen::SyntheticConfig synth_cfg;
-    synth_cfg.size_mb = 256.0;
+    synth_cfg.size_per_rank_mb = 256.0;
     const std::size_t total_elements = mans::data_gen::aligned_total_elements(
-        synth_cfg.size_mb, sizeof(std::uint16_t), synth_cfg.block_size);
+        synth_cfg.size_per_rank_mb, sizeof(std::uint16_t), synth_cfg.block_size);
 
     std::vector<std::uint16_t> data = mans::data_gen::generate_synthetic_slice<std::uint16_t>(
         kAdmThreshold, synth_cfg, total_elements, 0, total_elements);
