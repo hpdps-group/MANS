@@ -29,7 +29,7 @@ message(STATUS "==========================================")
 # =========================================================
 option(BUILD_HDF5_PLUGIN "Build HDF5 compression filter plugin (H5Z-MANS)" ON)
 message(STATUS "  *** BUILD_HDF5_PLUGIN: ${BUILD_HDF5_PLUGIN} ***")
-option(HDF5_PREFER_PARALLEL "Prefer parallel HDF5 if available" OFF)
+option(HDF5_PREFER_PARALLEL "Prefer parallel HDF5 if available" ON)
 message(STATUS "  *** HDF5_PREFER_PARALLEL: ${HDF5_PREFER_PARALLEL} ***")
 option(ENABLE_TIMING "Enable timing collection (mans_timing.h)" ON)
 message(STATUS "  *** ENABLE_TIMING: ${ENABLE_TIMING} ***")
@@ -42,7 +42,7 @@ endif()
 # platform control
 # -------------------------------
 set(VALID_PLATFORMS "cpu" "nv" "amd" "all" "cpu_nv" "cpu_amd")
-set(TARGET_PLATFORM "cpu_nv" CACHE STRING "Target platform to build: cpu / nv / amd / all / cpu_nv / cpu_amd")
+set(TARGET_PLATFORM "cpu" CACHE STRING "Target platform to build: cpu / nv / amd / all / cpu_nv / cpu_amd")
 if (NOT TARGET_PLATFORM IN_LIST VALID_PLATFORMS)
   message(FATAL_ERROR "Invalid TARGET_PLATFORM='${TARGET_PLATFORM}'. Must be one of: ${VALID_PLATFORMS}.")
 endif()

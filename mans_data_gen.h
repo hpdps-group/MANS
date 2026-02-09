@@ -36,7 +36,7 @@ struct SyntheticConfig {
 struct GeneratorConfig {
     SyntheticConfig synth{};
     std::string output_bin{};
-    std::uint32_t dtype = mans::DataType::U32;
+    std::uint32_t dtype = mans::DataType::U16;
     std::uint32_t adm_threshold = 4000U;
 };
 
@@ -171,7 +171,7 @@ inline GeneratorConfig load_generator_config(const std::string& path) {
             continue;
         }
 
-        if (key == "output_bin") {
+        if (key == "output_bin" || key == "output_name") {
             cfg.output_bin = val;
             continue;
         }

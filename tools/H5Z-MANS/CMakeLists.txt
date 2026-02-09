@@ -52,7 +52,7 @@ set_target_properties(H5Z-MANS_test PROPERTIES
 # =========================================================
 # Target 3: mans_data_gen (synthetic raw data generator)
 # =========================================================
-add_executable(mans_data_gen test/mans_data_gen_main.cpp)
+add_executable(mans_data_gen test/mans_data_gen_cli.cpp)
 target_link_libraries(mans_data_gen PRIVATE ${HDF5_LIBRARIES} $<$<BOOL:${HDF5_PREFER_PARALLEL}>:MPI::MPI_C>)
 set_target_properties(mans_data_gen PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/h5z-mans

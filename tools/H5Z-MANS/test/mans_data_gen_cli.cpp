@@ -10,19 +10,17 @@
 #include <string>
 #include <vector>
 
-#include "H5Z-MANS_config.h"
 #include "mans_data_gen.h"
 
 namespace fs = std::filesystem;
 
 struct GenOptions {
-    std::string output_bin;
+    std::string output_name;
     std::string output_dir;
     std::string config_file;
     std::string synth_config_file;
-    std::string mans_config_file;
 
-    std::optional<double> size_mb_override;
+    std::optional<double> size_per_rank_mb_override;
     std::optional<std::uint32_t> adm_threshold_override;
     std::optional<std::uint32_t> dtype_override;
     std::optional<std::size_t> ranks_override;
@@ -33,9 +31,9 @@ struct GenOptions {
 static void print_usage(const char* prog) {
     std::cerr
         << "Usage:\n  " << prog
-        << " [--config gen.cfg] [--output data.bin] [--output-dir DIR] [--output-prefix NAME]\n"
-           "         [--synth-config synth.cfg] [--size-mb MB] [--rank-size-mb MB] [--ranks N]\n"
-           "         [--jobs N] [--dtype u16|u32] [--adm-threshold N] [--mans-config mans.cfg]\n";
+        << " [--config gen.cfg] [--output-name name.bin] [--output-dir DIR] [--output-prefix NAME]\n"
+           "         [--synth-config synth.cfg] [--size-per-rank MB] [--ranks N] [--jobs N]\n"
+           "         [--dtype u16|u32] [--adm-threshold N]\n";
 }
 
 static std::uint32_t parse_dtype(std::string_view s) {
@@ -60,8 +58,8 @@ static std::optional<GenOptions> parse_args(int argc, char** argv) {
             return argv[++i];
         };
 
-        if (arg == "--output") {
-            opts.output_bin = need_value("--output");
+        if (arg == "--output-name") {
+            opts.output_name = need_value("--output-name");
             continue;
         }
         if (arg == "--output-dir") {
@@ -80,12 +78,8 @@ static std::optional<GenOptions> parse_args(int argc, char** argv) {
             opts.synth_config_file = need_value("--synth-config");
             continue;
         }
-        if (arg == "--size-mb") {
-            opts.size_mb_override = std::stod(need_value("--size-mb"));
-            continue;
-        }
-        if (arg == "--rank-size-mb") {
-            opts.size_mb_override = std::stod(need_value("--rank-size-mb"));
+        if (arg == "--size-per-rank") {
+            opts.size_per_rank_mb_override = std::stod(need_value("--size-per-rank"));
             continue;
         }
         if (arg == "--ranks") {
@@ -103,10 +97,6 @@ static std::optional<GenOptions> parse_args(int argc, char** argv) {
         if (arg == "--adm-threshold") {
             opts.adm_threshold_override = static_cast<std::uint32_t>(
                 std::stoul(need_value("--adm-threshold")));
-            continue;
-        }
-        if (arg == "--mans-config") {
-            opts.mans_config_file = need_value("--mans-config");
             continue;
         }
         if (arg == "--help" || arg == "-h") {
@@ -222,8 +212,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (opts.size_mb_override.has_value()) {
-        gen_cfg.synth.size_mb = *opts.size_mb_override;
+    if (opts.size_per_rank_mb_override.has_value()) {
+        gen_cfg.synth.size_mb = *opts.size_per_rank_mb_override;
     }
     if (gen_cfg.synth.size_mb <= 0.0) {
         gen_cfg.synth.size_mb = 256.0;
@@ -231,19 +221,6 @@ int main(int argc, char** argv) {
 
     std::uint32_t dtype = gen_cfg.dtype;
     std::uint32_t adm_threshold = gen_cfg.adm_threshold;
-
-    std::optional<mans::h5::MansConfig> mans_cfg;
-    if (!opts.mans_config_file.empty()) {
-        mans_cfg.emplace();
-        try {
-            mans_cfg->load(opts.mans_config_file);
-        } catch (const std::exception& e) {
-            std::cerr << "MANS config error: " << e.what() << "\n";
-            return 1;
-        }
-        dtype = mans_cfg->get_params().dtype;
-        adm_threshold = mans_cfg->get_params().adm_threshold;
-    }
 
     if (opts.dtype_override.has_value()) {
         dtype = *opts.dtype_override;
@@ -262,17 +239,18 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const std::string output_path = !opts.output_bin.empty() ? opts.output_bin : gen_cfg.output_bin;
+    const std::string output_name = !opts.output_name.empty() ? opts.output_name : gen_cfg.output_bin;
     const bool single_output_mode = (ranks == 1 && opts.output_dir.empty());
 
     fs::path rank_output_dir;
     std::string rank_output_prefix = opts.output_prefix_override.value_or("rank");
+    fs::path single_output_path;
 
     if (!single_output_mode) {
         if (!opts.output_dir.empty()) {
             rank_output_dir = fs::path(opts.output_dir);
-        } else if (!output_path.empty()) {
-            const fs::path candidate(output_path);
+        } else if (!output_name.empty()) {
+            const fs::path candidate(output_name);
             if (candidate.has_extension()) {
                 rank_output_dir = candidate.has_parent_path() ? candidate.parent_path() : fs::path(".");
                 if (!opts.output_prefix_override.has_value()) {
@@ -285,27 +263,24 @@ int main(int argc, char** argv) {
                 rank_output_dir = candidate;
             }
         } else {
-            std::cerr << "Missing output path. Provide --output-dir, --output, or set output_bin in --config.\n";
-            print_usage(argv[0]);
-            return 1;
+            rank_output_dir = fs::path(".");
         }
-
-        if (rank_output_prefix.empty()) {
-            std::cerr << "Invalid output prefix: empty string.\n";
-            return 1;
-        }
-    } else if (output_path.empty()) {
-        std::cerr << "Missing output path. Provide --output or set output_bin in --config.\n";
-        print_usage(argv[0]);
-        return 1;
+    } else {
+        single_output_path = output_name.empty() ? fs::path("rank0.bin") : fs::path(output_name);
     }
 
     try {
         if (single_output_mode && dtype == mans::DataType::U16) {
-            return generate_and_write<std::uint16_t>(gen_cfg.synth, adm_threshold, output_path);
+            return generate_and_write<std::uint16_t>(
+                gen_cfg.synth,
+                adm_threshold,
+                single_output_path.string());
         }
         if (single_output_mode) {
-            return generate_and_write<std::uint32_t>(gen_cfg.synth, adm_threshold, output_path);
+            return generate_and_write<std::uint32_t>(
+                gen_cfg.synth,
+                adm_threshold,
+                single_output_path.string());
         }
         if (dtype == mans::DataType::U16) {
             return generate_ranks_and_write<std::uint16_t>(
