@@ -57,3 +57,15 @@ target_link_libraries(mans_data_gen PRIVATE ${HDF5_LIBRARIES} $<$<BOOL:${HDF5_PR
 set_target_properties(mans_data_gen PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/h5z-mans
 )
+
+# =========================================================
+# Target 4: mans_write (minimal MPI independent compressed write test)
+# =========================================================
+add_executable(mans_write test/mans_write.cpp)
+if(NOT TARGET MPI::MPI_C)
+    find_package(MPI REQUIRED)
+endif()
+target_link_libraries(mans_write PRIVATE ${HDF5_LIBRARIES} MPI::MPI_C)
+set_target_properties(mans_write PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/h5z-mans
+)

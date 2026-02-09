@@ -1,14 +1,20 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <limits>
+#include <mutex>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "mans_defs.h"
@@ -32,6 +38,12 @@ struct GeneratorConfig {
     std::string output_bin{};
     std::uint32_t dtype = mans::DataType::U32;
     std::uint32_t adm_threshold = 4000U;
+};
+
+struct RankDatasetInfo {
+    std::size_t rank = 0;
+    std::size_t elements = 0;
+    fs::path output_path{};
 };
 
 inline std::string trim_copy(const std::string& str) {
@@ -318,9 +330,127 @@ inline std::vector<T> generate_synthetic_slice(std::uint32_t adm_threshold,
     return out;
 }
 
+inline std::string make_rank_filename(const std::string& prefix,
+                                      std::size_t rank,
+                                      std::size_t rank_count) {
+    const std::string stem = prefix.empty() ? "rank" : prefix;
+    const std::size_t digits = (rank_count > 1)
+        ? std::to_string(rank_count - 1).size()
+        : std::size_t{1};
+    std::ostringstream oss;
+    oss << stem << std::setw(static_cast<int>(digits))
+        << std::setfill('0') << rank << ".bin";
+    return oss.str();
+}
+
+template <typename T>
+inline void write_bin_file(const fs::path& output_path, const std::vector<T>& data) {
+    std::ofstream out(output_path, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+        throw std::runtime_error("Failed to open output: " + output_path.string());
+    }
+    out.write(reinterpret_cast<const char*>(data.data()),
+              static_cast<std::streamsize>(data.size() * sizeof(T)));
+    if (!out.good()) {
+        throw std::runtime_error("Failed to write output: " + output_path.string());
+    }
+}
+
+template <typename T>
+inline std::vector<RankDatasetInfo> generate_rank_datasets(std::uint32_t adm_threshold,
+                                                           const SyntheticConfig& cfg,
+                                                           std::size_t rank_count,
+                                                           const fs::path& output_dir,
+                                                           const std::string& output_prefix = "",
+                                                           std::size_t worker_threads = 0) {
+    if (rank_count == 0) {
+        throw std::runtime_error("rank_count must be >= 1");
+    }
+    if (cfg.size_mb <= 0.0) {
+        throw std::runtime_error("Synthetic size_mb must be > 0");
+    }
+    if (cfg.block_size == 0) {
+        throw std::runtime_error("Synthetic block_size cannot be 0");
+    }
+
+    fs::create_directories(output_dir);
+    const std::size_t elements = aligned_total_elements(cfg.size_mb, sizeof(T), cfg.block_size);
+
+    std::vector<RankDatasetInfo> outputs(rank_count);
+    for (std::size_t rank = 0; rank < rank_count; ++rank) {
+        outputs[rank].rank = rank;
+        outputs[rank].elements = elements;
+        outputs[rank].output_path =
+            output_dir / make_rank_filename(output_prefix, rank, rank_count);
+    }
+
+    std::size_t workers = worker_threads;
+    if (workers == 0) {
+        workers = static_cast<std::size_t>(std::thread::hardware_concurrency());
+        if (workers == 0) {
+            workers = 1;
+        }
+    }
+    workers = std::max<std::size_t>(1, std::min(workers, rank_count));
+
+    std::atomic<std::size_t> next_rank{0};
+    std::mutex err_mu;
+    std::exception_ptr first_error;
+    std::atomic<bool> has_error{false};
+
+    auto worker = [&]() {
+        while (true) {
+            if (has_error.load(std::memory_order_acquire)) {
+                return;
+            }
+
+            const std::size_t rank = next_rank.fetch_add(1);
+            if (rank >= rank_count) {
+                return;
+            }
+
+            try {
+                SyntheticConfig rank_cfg = cfg;
+                rank_cfg.seed = cfg.seed + static_cast<std::uint64_t>(rank * 1315423911ULL);
+                const auto data = generate_synthetic_slice<T>(
+                    adm_threshold,
+                    rank_cfg,
+                    elements,
+                    /*slice_offset=*/0,
+                    /*slice_count=*/elements);
+                write_bin_file(outputs[rank].output_path, data);
+            } catch (...) {
+                std::lock_guard<std::mutex> lock(err_mu);
+                if (!first_error) {
+                    first_error = std::current_exception();
+                    has_error.store(true, std::memory_order_release);
+                }
+                return;
+            }
+        }
+    };
+
+    if (workers == 1) {
+        worker();
+    } else {
+        std::vector<std::thread> threads;
+        threads.reserve(workers);
+        for (std::size_t i = 0; i < workers; ++i) {
+            threads.emplace_back(worker);
+        }
+        for (auto& t : threads) {
+            t.join();
+        }
+    }
+
+    if (first_error) {
+        std::rethrow_exception(first_error);
+    }
+    return outputs;
+}
+
 } // namespace mans::data_gen
 
 namespace mans::h5 {
 namespace data_gen = mans::data_gen;
 } // namespace mans::h5
-
