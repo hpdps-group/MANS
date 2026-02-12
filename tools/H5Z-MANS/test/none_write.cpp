@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 #include <hdf5.h>
@@ -10,6 +11,19 @@
 #define CHECK_H5(x) do { if ((x) < 0) { std::fprintf(stderr, "HDF5 failed: %s\n", #x); std::exit(1); } } while (0)
 
 int main(int argc, char** argv) {
+    double chunk_size_mb = 8.0;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--chunk-size-mb") == 0) {
+            char* end = nullptr;
+            double value = std::strtod(argv[++i], &end);
+            if (end == nullptr || *end != '\0' || value <= 0.0) {
+                std::fprintf(stderr, "invalid --chunk-size-mb: %s\n", argv[i]);
+                return 1;
+            }
+            chunk_size_mb = value;
+        }
+    }
+
     MPI_Init(&argc, &argv);
     int rank = 0, nprocs = 1;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -20,8 +34,8 @@ int main(int argc, char** argv) {
 
     stage("loading input");
     char in[64], out[64];
-    std::snprintf(in, sizeof(in), "rank%d.bin", rank);
-    std::snprintf(out, sizeof(out), "rank%d.none.h5", rank);
+    std::snprintf(in, sizeof(in), "datasets/rank%d.bin", rank);
+    std::snprintf(out, sizeof(out), "datasets/rank%d.h5", rank);
     std::FILE* fp = std::fopen(in, "rb");
     if (!fp) { std::fprintf(stderr, "rank %d missing input: %s\n", rank, in); return 1; }
     std::fseek(fp, 0, SEEK_END);
@@ -45,15 +59,16 @@ int main(int argc, char** argv) {
     hid_t file = H5Fcreate(out, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
     H5Pclose(fapl);
 
-    constexpr hsize_t kChunkBytes = 8ULL * 1024 * 1024; // 8 MiB
+    hsize_t chunk_bytes = static_cast<hsize_t>(chunk_size_mb * 1024.0 * 1024.0);
+    if (rank == 0) std::printf("[none_write] chunk-size-mb=%.6g\n", chunk_size_mb);
     hsize_t dims[1] = {(hsize_t)elems};
-    hsize_t chunk[1] = {kChunkBytes / (hsize_t)sizeof(std::uint16_t)};
+    hsize_t chunk[1] = {chunk_bytes / (hsize_t)sizeof(std::uint16_t)};
     if (chunk[0] == 0 || chunk[0] > dims[0]) chunk[0] = dims[0];
 
     hid_t space = H5Screate_simple(1, dims, nullptr);
     hid_t dcpl = H5Pcreate(H5P_DATASET_CREATE);
     CHECK_H5(H5Pset_chunk(dcpl, 1, chunk));
-    CHECK_H5(H5Pset_filter(dcpl, FILTER_ID_NONE, 0, 0, nullptr));
+    // CHECK_H5(H5Pset_filter(dcpl, FILTER_ID_NONE, 0, 0, nullptr));
     hid_t dset = H5Dcreate2(file, "data", H5T_NATIVE_USHORT, space, H5P_DEFAULT, dcpl, H5P_DEFAULT);
     H5Pclose(dcpl);
 

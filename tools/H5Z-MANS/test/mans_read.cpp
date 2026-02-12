@@ -19,7 +19,7 @@ int main(int argc, char** argv) {
 
     stage("opening input hdf5");
     char in[64];
-    std::snprintf(in, sizeof(in), "rank%d.h5", rank);
+    std::snprintf(in, sizeof(in), "datasets/rank%d.h5", rank);
 
     hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
     hid_t file = H5Fopen(in, H5F_ACC_RDONLY, fapl);
