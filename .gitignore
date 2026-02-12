@@ -5,4 +5,4 @@ MANS_figure/
 build/
 .vscode
 __pycache__
-slurms
+slurms/runs*
