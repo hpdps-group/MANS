@@ -80,6 +80,24 @@ set_target_properties(mans_read PROPERTIES
 )
 
 # =========================================================
+# Target 5b: mans-original-write (minimal MPI compressed write test)
+# =========================================================
+add_executable(mans-original-write test/mans-original-write.cpp)
+target_link_libraries(mans-original-write PRIVATE ${HDF5_LIBRARIES} MPI::MPI_C)
+set_target_properties(mans-original-write PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/h5z-mans
+)
+
+# =========================================================
+# Target 5c: mans-original-read (minimal MPI compressed read test)
+# =========================================================
+add_executable(mans-original-read test/mans-original-read.cpp)
+target_link_libraries(mans-original-read PRIVATE ${HDF5_LIBRARIES} MPI::MPI_C)
+set_target_properties(mans-original-read PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/h5z-mans
+)
+
+# =========================================================
 # Target 6: none_write (minimal MPI pass-through write test)
 # =========================================================
 add_executable(none_write test/none_write.cpp)
