@@ -1,110 +1,62 @@
-// compiler: g++ -std=c++17 -O3 cpu_mans_bench.cpp mans_cpu.cpp -o cpu_mans_bench -fopenmp
-// exec    : OMP_NUM_THREADS=4 ./cpu_mans_bench u2 input.u2 output.bin 1
-//           OMP_NUM_THREADS=4 ./cpu_mans_bench u4 input.u4 output.bin 0
+#include "adm/adm_utils.h"
+#include "adm/adm.h"
+#include "pans/CpuANSUtils.h"
+#include "mans_cpu.h"
+#include "file_utils.h"
+#include "../mans_defs.h"
+#include "../mans_timing.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <memory>
+#include <limits>
 #include <sstream>
 #include <string>
-#include <string_view>
 #include <type_traits>
 #include <vector>
 
-#include "../mans_defs.h"
-#include "../mans_timing.h"
-#include "adm/adm.h"
-#include "adm/adm_utils.h"
-#include "mans_cpu.h"
-#include "mans_container.h"
-#include "file_utils.h"
-
 namespace {
-
-constexpr const char* kAnsiReset = "\033[0m";
-constexpr const char* kAnsiBold = "\033[1m";
-constexpr const char* kAnsiDim = "\033[2m";
-constexpr const char* kAnsiRed = "\033[31m";
-constexpr const char* kAnsiGreen = "\033[32m";
-constexpr const char* kAnsiYellow = "\033[33m";
-constexpr const char* kAnsiBlue = "\033[34m";
-constexpr const char* kAnsiCyan = "\033[36m";
 
 struct ChunkInfo {
     std::size_t offset = 0;
     std::size_t len = 0;
 };
 
-struct ChunkMeta {
-    std::size_t payload_offset = 0;
-    std::size_t comp_len = 0;
-    std::size_t raw_len = 0;
+struct RunStats {
+    double comp_ms = 0.0;
+    double decomp_ms = 0.0;
+    std::size_t comp_bytes = 0;
+    bool ok = true;
+    std::string error;
 };
 
-enum class ContainerParseResult {
-    kNotContainer,
-    kOk,
-    kError
-};
-
-enum class BenchMode {
-    Bench,
-    Compress,
-    Decompress
-};
-
-bool parse_mode(const std::string& text, BenchMode& mode, std::string& error) {
-    if (text == "bench") {
-        mode = BenchMode::Bench;
-        return true;
-    }
-    if (text == "compress") {
-        mode = BenchMode::Compress;
-        return true;
-    }
-    if (text == "decompress") {
-        mode = BenchMode::Decompress;
-        return true;
-    }
-    error = "Invalid --mode value: " + text + " (expected compress|decompress|bench)";
-    return false;
-}
-
-template <typename T>
-bool write_struct(std::vector<std::uint8_t>& data, std::size_t offset, const T& value) {
-    if (offset + sizeof(T) > data.size()) {
-        return false;
-    }
-    std::memcpy(data.data() + offset, &value, sizeof(T));
-    return true;
-}
-
-std::vector<ChunkInfo> build_chunks(std::size_t total_elements, std::size_t chunk_elements) {
-    std::vector<ChunkInfo> chunks;
-    std::size_t offset = 0;
-    while (offset < total_elements) {
-        std::size_t len = std::min(chunk_elements, total_elements - offset);
-        chunks.push_back(ChunkInfo{offset, len});
-        offset += len;
+std::vector<double> parse_chunks(const std::string& arg) {
+    std::vector<double> chunks;
+    std::stringstream ss(arg);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        if (item.empty()) {
+            continue;
+        }
+        chunks.push_back(std::stod(item));
     }
     return chunks;
 }
 
-std::vector<int> parse_threads(const std::string& arg, std::string& error) {
-    std::vector<int> threads;
+bool parse_threads(const std::string& arg, std::vector<int>& threads, std::string& error) {
+    threads.clear();
     std::stringstream ss(arg);
     std::string item;
     while (std::getline(ss, item, ',')) {
         if (item.empty()) {
             error = "Empty thread entry in --threads list.";
-            return {};
+            return false;
         }
         std::size_t idx = 0;
         int value = 0;
@@ -112,19 +64,19 @@ std::vector<int> parse_threads(const std::string& arg, std::string& error) {
             value = std::stoi(item, &idx);
         } catch (const std::exception&) {
             error = "Invalid thread value in --threads list: " + item;
-            return {};
+            return false;
         }
         if (idx != item.size()) {
             error = "Invalid thread value in --threads list: " + item;
-            return {};
+            return false;
         }
         if (value <= 0) {
             error = "Thread values must be positive integers.";
-            return {};
+            return false;
         }
         threads.push_back(value);
     }
-    return threads;
+    return true;
 }
 
 void apply_thread_overrides(mans::MansParams& params, const std::vector<int>& threads) {
@@ -138,498 +90,135 @@ void apply_thread_overrides(mans::MansParams& params, const std::vector<int>& th
     params.adm_decode_values_threads = threads[7];
 }
 
-template <typename T>
-bool load_input_with_timing(const std::string& input_file, std::vector<T>& host_data,
-                            double& io_read_ms) {
-    MANS_TIMING_SCOPE("compress/io_read");
-    auto start = std::chrono::high_resolution_clock::now();
-    bool ok = false;
-    if constexpr (std::is_same_v<T, std::uint16_t>) {
-        ok = load_u16_file(input_file, host_data);
-    } else {
-        ok = load_u32_file(input_file, host_data);
-    }
-    auto end = std::chrono::high_resolution_clock::now();
-    io_read_ms =
-        std::chrono::duration<double, std::milli>(end - start).count();
-    return ok;
+void apply_auto_thread_config(mans::MansParams& params, const mans::cpu::CsvThreadConfig& cfg) {
+    params.adm_decide_threads = cfg.adm_decide_threads;
+    params.adm_center_calc_threads = cfg.compress_threads;
+    params.adm_encode_threads = cfg.compress_threads;
+    params.adm_warp_reduce_threads = cfg.compress_threads;
+    params.adm_fill_tail_threads = cfg.compress_threads;
+    params.adm_write_back_threads = cfg.compress_threads;
+    params.adm_restore_signals_threads = cfg.decompress_threads;
+    params.adm_decode_values_threads = cfg.decompress_threads;
 }
 
-double write_output_with_timing(const std::string& output_file,
-                                const std::vector<std::uint8_t>& data) {
-    MANS_TIMING_SCOPE("compress/io_write");
-    auto start = std::chrono::high_resolution_clock::now();
-    bool ok = save_u8_file(output_file, data);
-    auto end = std::chrono::high_resolution_clock::now();
-    if (!ok) {
-        return -1.0;
+std::string format_chunk_label(std::size_t bytes) {
+    const std::size_t kib = 1024;
+    const std::size_t mib = 1024 * 1024;
+    std::ostringstream out;
+    if (bytes % mib == 0) {
+        out << (bytes / mib) << "M";
+        return out.str();
     }
-    return std::chrono::duration<double, std::milli>(end - start).count();
-}
-
-bool load_u8_with_timing(const std::string& input_file,
-                         std::vector<std::uint8_t>& input_data,
-                         double& io_read_ms) {
-    MANS_TIMING_SCOPE("decompress/io_read");
-    auto start = std::chrono::high_resolution_clock::now();
-    const bool ok = load_u8_file(input_file, input_data);
-    auto end = std::chrono::high_resolution_clock::now();
-    io_read_ms = std::chrono::duration<double, std::milli>(end - start).count();
-    return ok;
+    if (bytes % kib == 0) {
+        out << (bytes / kib) << "K";
+        return out.str();
+    }
+    out << bytes << "B";
+    return out.str();
 }
 
 template <typename T>
-bool compress_chunks(const std::vector<T>& host_data,
-                     const mans::MansParams& params,
-                     std::size_t chunk_elements,
-                     bool save_adm,
-                     const std::string& adm_path,
-                     std::vector<std::uint8_t>& compressed_data,
-                     double& comp_ms) {
-    std::vector<ChunkInfo> chunks = build_chunks(host_data.size(), chunk_elements);
-    if (chunks.empty()) {
-        return false;
-    }
-
+std::vector<ChunkInfo> build_chunks(std::size_t total_elements, std::size_t chunk_elements) {
+    std::vector<ChunkInfo> chunks;
     std::size_t offset = 0;
-    auto start = std::chrono::high_resolution_clock::now();
-    MANS_TIMING_SCOPE("compress/compute");
+    while (offset < total_elements) {
+        std::size_t len = std::min(chunk_elements, total_elements - offset);
+        chunks.push_back(ChunkInfo{offset, len});
+        offset += len;
+    }
+    return chunks;
+}
 
-    std::vector<std::vector<std::uint8_t>> payloads;
-    std::vector<std::uint64_t> raw_lens;
-    payloads.reserve(chunks.size());
-    raw_lens.reserve(chunks.size());
-    std::size_t total_payload_bytes = 0;
+template <typename T>
+std::size_t max_mans_chunk_compressed_size(std::size_t chunk_elements) {
+    const std::size_t raw_bytes = chunk_elements * sizeof(T);
+    const std::size_t adm_bound = adm_max_compressed_size<T>(chunk_elements);
+    const std::size_t max_pans_input_bytes = std::max(raw_bytes, adm_bound);
+    if (max_pans_input_bytes >
+        static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+        return 0;
+    }
+    return 1 + static_cast<std::size_t>(
+                   cpu_ans::getMaxCompressedSize(
+                       static_cast<std::uint32_t>(max_pans_input_bytes)));
+}
+
+template <typename T>
+RunStats run_once(const std::vector<T>& input,
+                  const std::vector<ChunkInfo>& chunks,
+                  const std::vector<std::size_t>& chunk_caps,
+                  std::vector<std::uint8_t>& compressed_chunk,
+                  std::vector<std::uint8_t>& recovered,
+                  const mans::MansParams& params) {
+    RunStats stats;
 
     for (std::size_t i = 0; i < chunks.size(); ++i) {
         const auto& chunk = chunks[i];
-        const std::size_t input_bytes = chunk.len * sizeof(T);
-        const std::size_t max_out_size = input_bytes * 2 + 4096;
-        std::vector<std::uint8_t> chunk_payload(max_out_size);
-        std::size_t out_size = chunk_payload.size();
-        mans::cpu::compress_internal(
-            host_data.data() + chunk.offset,
-            chunk.len,
-            params,
-            chunk_payload.data(),
-            out_size,
-            save_adm,
-            adm_path
-        );
-        if (out_size == 0) {
-            return false;
-        }
-        chunk_payload.resize(out_size);
-        total_payload_bytes += sizeof(mans::container::ChunkHeader) + out_size;
-        payloads.emplace_back(std::move(chunk_payload));
-        raw_lens.push_back(static_cast<std::uint64_t>(input_bytes));
-    }
-    auto end = std::chrono::high_resolution_clock::now();
-    comp_ms =
-        std::chrono::duration<double, std::milli>(end - start).count();
-
-    mans::container::ContainerHeader header{};
-    std::memcpy(header.magic, mans::container::kContainerMagic,
-                sizeof(mans::container::kContainerMagic));
-    header.version = mans::container::kContainerVersion;
-    header.dtype = (params.dtype == mans::DataType::U16) ? 1 : 2;
-    header.reserved0 = 0;
-    header.header_bytes = static_cast<std::uint16_t>(sizeof(mans::container::ContainerHeader));
-    header.chunk_count = static_cast<std::uint64_t>(chunks.size());
-    header.index_offset = sizeof(mans::container::ContainerHeader);
-    header.data_offset = header.index_offset +
-                         header.chunk_count * sizeof(mans::container::IndexEntry);
-    header.chunk_header_bytes = sizeof(mans::container::ChunkHeader);
-    header.flags = 0;
-
-    const std::size_t total_size = static_cast<std::size_t>(header.data_offset) + total_payload_bytes;
-    compressed_data.clear();
-    compressed_data.resize(total_size);
-
-    if (!write_struct(compressed_data, 0, header)) {
-        return false;
-    }
-    for (std::size_t i = 0; i < payloads.size(); ++i) {
-        mans::container::IndexEntry entry{};
-        entry.offset = static_cast<std::uint64_t>(header.data_offset + offset);
-        entry.comp_len = static_cast<std::uint64_t>(payloads[i].size());
-        entry.raw_len = raw_lens[i];
-        const std::size_t index_offset =
-            static_cast<std::size_t>(header.index_offset + i * sizeof(mans::container::IndexEntry));
-        if (!write_struct(compressed_data, index_offset, entry)) {
-            return false;
-        }
-        mans::container::ChunkHeader chunk_header{};
-        std::memcpy(chunk_header.magic, mans::container::kChunkMagic,
-                    sizeof(mans::container::kChunkMagic));
-        chunk_header.version = mans::container::kChunkVersion;
-        chunk_header.header_bytes = static_cast<std::uint16_t>(sizeof(mans::container::ChunkHeader));
-        chunk_header.comp_len = entry.comp_len;
-        chunk_header.raw_len = entry.raw_len;
-        chunk_header.chunk_index = static_cast<std::uint64_t>(i);
-        if (!write_struct(compressed_data, static_cast<std::size_t>(entry.offset), chunk_header)) {
-            return false;
-        }
-        const std::size_t payload_offset =
-            static_cast<std::size_t>(entry.offset + sizeof(mans::container::ChunkHeader));
-        if (payload_offset + payloads[i].size() > compressed_data.size()) {
-            return false;
-        }
-        std::memcpy(compressed_data.data() + payload_offset,
-                    payloads[i].data(),
-                    payloads[i].size());
-        offset += sizeof(mans::container::ChunkHeader) + payloads[i].size();
-    }
-
-    return offset == total_payload_bytes;
-}
-
-ContainerParseResult parse_container(
-    const std::vector<std::uint8_t>& input,
-    std::uint32_t expected_dtype,
-    std::vector<ChunkMeta>& chunks,
-    std::size_t& total_raw_bytes,
-    std::uint64_t& chunk_count,
-    std::string& error) {
-    total_raw_bytes = 0;
-    chunk_count = 0;
-    chunks.clear();
-
-    if (input.size() < sizeof(mans::container::ContainerHeader)) {
-        return ContainerParseResult::kNotContainer;
-    }
-
-    mans::container::ContainerHeader header{};
-    std::memcpy(&header, input.data(), sizeof(header));
-    if (!mans::container::magic_matches(
-            header.magic, mans::container::kContainerMagic,
-            sizeof(mans::container::kContainerMagic))) {
-        return ContainerParseResult::kNotContainer;
-    }
-
-    if (header.version != mans::container::kContainerVersion) {
-        error = "Unsupported container version: " + std::to_string(header.version);
-        return ContainerParseResult::kError;
-    }
-    if (header.header_bytes != sizeof(mans::container::ContainerHeader)) {
-        error = "Container header size mismatch.";
-        return ContainerParseResult::kError;
-    }
-    if (header.chunk_header_bytes != sizeof(mans::container::ChunkHeader)) {
-        error = "Chunk header size mismatch.";
-        return ContainerParseResult::kError;
-    }
-
-    const std::uint8_t expected_dtype_id =
-        (expected_dtype == mans::DataType::U16) ? 1 : 2;
-    if (header.dtype != expected_dtype_id) {
-        error = "Data type mismatch: file dtype=" + std::to_string(header.dtype) +
-                ", expected=" + std::to_string(expected_dtype_id);
-        return ContainerParseResult::kError;
-    }
-
-    const std::uint64_t index_bytes =
-        header.chunk_count * sizeof(mans::container::IndexEntry);
-    if (header.index_offset + index_bytes > input.size()) {
-        error = "Index table exceeds file size.";
-        return ContainerParseResult::kError;
-    }
-    if (header.data_offset > input.size()) {
-        error = "Data offset exceeds file size.";
-        return ContainerParseResult::kError;
-    }
-
-    chunks.reserve(static_cast<std::size_t>(header.chunk_count));
-    for (std::uint64_t i = 0; i < header.chunk_count; ++i) {
-        const std::size_t index_offset = static_cast<std::size_t>(
-            header.index_offset + i * sizeof(mans::container::IndexEntry));
-        mans::container::IndexEntry entry{};
-        std::memcpy(&entry, input.data() + index_offset, sizeof(entry));
-
-        if (entry.offset > input.size() - sizeof(mans::container::ChunkHeader)) {
-            error = "Chunk header offset exceeds file size.";
-            return ContainerParseResult::kError;
-        }
-        const std::size_t chunk_offset = static_cast<std::size_t>(entry.offset);
-        mans::container::ChunkHeader chunk_header{};
-        std::memcpy(&chunk_header, input.data() + chunk_offset, sizeof(chunk_header));
-        if (!mans::container::magic_matches(
-                chunk_header.magic, mans::container::kChunkMagic,
-                sizeof(mans::container::kChunkMagic))) {
-            error = "Chunk header magic mismatch.";
-            return ContainerParseResult::kError;
-        }
-        if (chunk_header.version != mans::container::kChunkVersion) {
-            error = "Unsupported chunk version.";
-            return ContainerParseResult::kError;
-        }
-        if (chunk_header.header_bytes != sizeof(mans::container::ChunkHeader)) {
-            error = "Chunk header size mismatch.";
-            return ContainerParseResult::kError;
-        }
-        if (chunk_header.comp_len != entry.comp_len ||
-            chunk_header.raw_len != entry.raw_len) {
-            error = "Chunk index mismatch.";
-            return ContainerParseResult::kError;
+        if (chunk_caps[i] > compressed_chunk.size()) {
+            stats.ok = false;
+            stats.error = "Internal compressed buffer too small at chunk index " +
+                          std::to_string(i);
+            return stats;
         }
 
-        const std::size_t payload_offset =
-            chunk_offset + sizeof(mans::container::ChunkHeader);
-        if (entry.comp_len > input.size() - payload_offset) {
-            error = "Chunk payload exceeds file size.";
-            return ContainerParseResult::kError;
+        std::size_t compressed_size = chunk_caps[i];
+        {
+            MANS_TIMING_SCOPE("mans/compress_total");
+            auto comp_start = std::chrono::high_resolution_clock::now();
+            mans::cpu::compress_internal(
+                input.data() + chunk.offset,
+                chunk.len,
+                params,
+                compressed_chunk.data(),
+                compressed_size,
+                false,
+                "");
+            auto comp_end = std::chrono::high_resolution_clock::now();
+            stats.comp_ms +=
+                std::chrono::duration<double, std::milli>(comp_end - comp_start).count();
         }
 
-        chunks.push_back(
-            ChunkMeta{payload_offset,
-                      static_cast<std::size_t>(entry.comp_len),
-                      static_cast<std::size_t>(entry.raw_len)});
-        total_raw_bytes += static_cast<std::size_t>(entry.raw_len);
+        if (compressed_size == 0 || compressed_size > chunk_caps[i]) {
+            stats.ok = false;
+            stats.error = "Compression failed at chunk index " + std::to_string(i);
+            return stats;
+        }
+        stats.comp_bytes += compressed_size;
+
+        const std::size_t expected_bytes = chunk.len * sizeof(T);
+        std::size_t recovered_size = expected_bytes;
+        {
+            MANS_TIMING_SCOPE("mans/decompress_total");
+            auto decomp_start = std::chrono::high_resolution_clock::now();
+            mans::cpu::decompress_internal(
+                compressed_chunk.data(),
+                compressed_size,
+                params,
+                recovered.data(),
+                recovered_size,
+                false,
+                "");
+            auto decomp_end = std::chrono::high_resolution_clock::now();
+            stats.decomp_ms +=
+                std::chrono::duration<double, std::milli>(decomp_end - decomp_start).count();
+        }
+
+        if (recovered_size != expected_bytes ||
+            std::memcmp(recovered.data(), input.data() + chunk.offset, expected_bytes) != 0) {
+            stats.ok = false;
+            stats.error = "Decompression mismatch at chunk index " + std::to_string(i);
+            return stats;
+        }
     }
 
-    chunk_count = header.chunk_count;
-    return ContainerParseResult::kOk;
+    return stats;
 }
 
 template <typename T>
-bool decompress_and_verify(const std::vector<std::uint8_t>& input_data,
-                           const std::vector<T>& original,
-                           const mans::MansParams& params,
-                           bool save_adm,
-                           const std::string& adm_path,
-                           double& decomp_ms,
-                           std::size_t& output_bytes_size,
-                           std::uint64_t& chunk_count,
-                           bool& used_container,
-                           std::string& error) {
-    std::vector<ChunkMeta> chunks;
-    std::size_t total_raw_bytes = 0;
-    ContainerParseResult parse_result = ContainerParseResult::kNotContainer;
-
-    {
-        MANS_TIMING_SCOPE("decompress/parse_container");
-        parse_result =
-            parse_container(input_data, params.dtype, chunks, total_raw_bytes, chunk_count, error);
-    }
-    if (parse_result == ContainerParseResult::kError) {
-        return false;
-    }
-    used_container = (parse_result == ContainerParseResult::kOk);
-
-    std::vector<std::uint8_t> output_bytes;
-    if (used_container) {
-        output_bytes_size = total_raw_bytes;
-        {
-            MANS_TIMING_SCOPE("decompress/alloc_output");
-            output_bytes.resize(output_bytes_size);
-        }
-        std::size_t out_offset = 0;
-        auto start = std::chrono::high_resolution_clock::now();
-        {
-            MANS_TIMING_SCOPE("decompress/compute");
-            for (const auto& chunk : chunks) {
-                std::size_t out_len = chunk.raw_len;
-                mans::cpu::decompress_internal(
-                    input_data.data() + chunk.payload_offset,
-                    chunk.comp_len,
-                    params,
-                    output_bytes.data() + out_offset,
-                    out_len,
-                    save_adm,
-                    adm_path);
-                if (out_len != chunk.raw_len) {
-                    error = "Chunk decompressed size mismatch.";
-                    return false;
-                }
-                out_offset += out_len;
-            }
-        }
-        auto end = std::chrono::high_resolution_clock::now();
-        decomp_ms = std::chrono::duration<double, std::milli>(end - start).count();
-    } else {
-        std::size_t estimated_out_size = input_data.size() * 10 + 4096;
-        {
-            MANS_TIMING_SCOPE("decompress/alloc_output");
-            output_bytes.resize(estimated_out_size);
-        }
-        std::size_t out_len = estimated_out_size;
-        auto start = std::chrono::high_resolution_clock::now();
-        {
-            MANS_TIMING_SCOPE("decompress/compute");
-            mans::cpu::decompress_internal(
-                input_data.data(),
-                input_data.size(),
-                params,
-                output_bytes.data(),
-                out_len,
-                save_adm,
-                adm_path);
-        }
-        auto end = std::chrono::high_resolution_clock::now();
-        decomp_ms = std::chrono::duration<double, std::milli>(end - start).count();
-
-        if (out_len == 0) {
-            error = "Decompression failed or returned 0 bytes.";
-            return false;
-        }
-        output_bytes_size = out_len;
-        chunk_count = 1;
-    }
-
-    const std::size_t expected_bytes = original.size() * sizeof(T);
-    if (output_bytes_size != expected_bytes) {
-        error = "Decompressed size mismatch: expected " + std::to_string(expected_bytes) +
-                " bytes, got " + std::to_string(output_bytes_size);
-        return false;
-    }
-    {
-        MANS_TIMING_SCOPE("decompress/verify");
-        if (std::memcmp(output_bytes.data(), original.data(), expected_bytes) != 0) {
-            error = "Decompressed data mismatch.";
-            return false;
-        }
-    }
-
-    return true;
-}
-
-template <typename T>
-bool decompress_only(const std::vector<std::uint8_t>& input_data,
-                     const mans::MansParams& params,
-                     bool save_adm,
-                     const std::string& adm_path,
-                     double& decomp_ms,
-                     std::size_t& output_bytes_size,
-                     std::uint64_t& chunk_count,
-                     bool& used_container,
-                     std::vector<std::uint8_t>& output_bytes,
-                     std::string& error) {
-    std::vector<ChunkMeta> chunks;
-    std::size_t total_raw_bytes = 0;
-    ContainerParseResult parse_result = ContainerParseResult::kNotContainer;
-
-    {
-        MANS_TIMING_SCOPE("decompress/parse_container");
-        parse_result =
-            parse_container(input_data, params.dtype, chunks, total_raw_bytes, chunk_count, error);
-    }
-    if (parse_result == ContainerParseResult::kError) {
-        return false;
-    }
-    used_container = (parse_result == ContainerParseResult::kOk);
-
-    if (used_container) {
-        output_bytes_size = total_raw_bytes;
-        {
-            MANS_TIMING_SCOPE("decompress/alloc_output");
-            output_bytes.resize(output_bytes_size);
-        }
-        std::size_t out_offset = 0;
-        auto start = std::chrono::high_resolution_clock::now();
-        {
-            MANS_TIMING_SCOPE("decompress/compute");
-            for (const auto& chunk : chunks) {
-                std::size_t out_len = chunk.raw_len;
-                mans::cpu::decompress_internal(
-                    input_data.data() + chunk.payload_offset,
-                    chunk.comp_len,
-                    params,
-                    output_bytes.data() + out_offset,
-                    out_len,
-                    save_adm,
-                    adm_path);
-                if (out_len != chunk.raw_len) {
-                    error = "Chunk decompressed size mismatch.";
-                    return false;
-                }
-                out_offset += out_len;
-            }
-        }
-        auto end = std::chrono::high_resolution_clock::now();
-        decomp_ms = std::chrono::duration<double, std::milli>(end - start).count();
-    } else {
-        std::size_t estimated_out_size = input_data.size() * 10 + 4096;
-        {
-            MANS_TIMING_SCOPE("decompress/alloc_output");
-            output_bytes.resize(estimated_out_size);
-        }
-        std::size_t out_len = estimated_out_size;
-        auto start = std::chrono::high_resolution_clock::now();
-        {
-            MANS_TIMING_SCOPE("decompress/compute");
-            mans::cpu::decompress_internal(
-                input_data.data(),
-                input_data.size(),
-                params,
-                output_bytes.data(),
-                out_len,
-                save_adm,
-                adm_path);
-        }
-        auto end = std::chrono::high_resolution_clock::now();
-        decomp_ms = std::chrono::duration<double, std::milli>(end - start).count();
-
-        if (out_len == 0) {
-            error = "Decompression failed or returned 0 bytes.";
-            return false;
-        }
-        output_bytes_size = out_len;
-        chunk_count = 1;
-        output_bytes.resize(out_len);
-    }
-
-    return true;
-}
-
-} // namespace
-
-int main(int argc, char** argv) {
-    if (argc < 5) {
-        std::cerr << kAnsiRed << "Use: " << kAnsiReset << argv[0]
-                  << " <u2|u4> <input_file> <output_bin_file> <save_adm(0|1)>"
-                  << " [--threshold 4000] [--chunk-mb 0.0]"
-                  << " [--threads 16,32,32,32,32,32,32,32]"
-                  << " [--mode compress|decompress|bench]"
-                  << " [--csv out.csv]\n";
-        return 1;
-    }
-
-    std::string dtype_str   = argv[1];
-    std::string input_file  = argv[2];
-    std::string output_file = argv[3];
-    std::string save_flag   = argv[4];
-
-    bool save_adm = (save_flag == "1");
-    uint32_t threshold = 4000;
-    double chunk_mb = 0.0;
-    std::string csv_base;
-    std::string threads_arg;
-    bool has_threads = false;
-    BenchMode mode = BenchMode::Bench;
-
-    for (int i = 5; i < argc; ++i) {
-        std::string arg = argv[i];
-        if (arg == "--threshold" && i + 1 < argc) {
-            threshold = static_cast<uint32_t>(std::stoul(argv[++i]));
-        } else if (arg == "--chunk-mb" && i + 1 < argc) {
-            chunk_mb = std::stod(argv[++i]);
-        } else if (arg == "--threads" && i + 1 < argc) {
-            threads_arg = argv[++i];
-            has_threads = true;
-        } else if (arg == "--mode" && i + 1 < argc) {
-            std::string error;
-            if (!parse_mode(argv[++i], mode, error)) {
-                std::cerr << error << "\n";
-                return 1;
-            }
-        } else if (arg == "--csv" && i + 1 < argc) {
-            csv_base = argv[++i];
-        }
-    }
-
-    mans::MansParams params{};
+void init_params(mans::MansParams& params) {
     params.backend = mans::Backend::CPU;
-    params.adm_threshold = threshold;
+    params.dtype = std::is_same_v<T, std::uint16_t> ? mans::DataType::U16 : mans::DataType::U32;
+    params.adm_threshold = 4000;
     params.adm_decide_threads = 16;
     params.adm_center_calc_threads = 32;
     params.adm_encode_threads = 32;
@@ -638,20 +227,212 @@ int main(int argc, char** argv) {
     params.adm_write_back_threads = 32;
     params.adm_restore_signals_threads = 32;
     params.adm_decode_values_threads = 32;
+}
 
-    if (dtype_str == "u2" || dtype_str == "-u2") {
-        params.dtype = mans::DataType::U16;
-    } else if (dtype_str == "u4" || dtype_str == "-u4") {
-        params.dtype = mans::DataType::U32;
-    } else {
-        std::cerr << "Unknown data type flag: " << dtype_str << "\nUse: u2 or u4\n";
+template <typename T>
+int run_bench_for_type(const std::vector<T>& input,
+                       const std::vector<double>& chunks_mb,
+                       mans::MansParams& params,
+                       std::ofstream* csv,
+                       const std::string& timing_csv_base,
+                       bool timing_per_chunk,
+                       const std::vector<mans::cpu::CsvThreadConfig>* auto_threads) {
+    if (input.empty()) {
+        std::cerr << "Input file is empty.\n";
         return 1;
     }
 
+    const std::size_t total_elements = input.size();
+    const std::size_t total_bytes = total_elements * sizeof(T);
+
+    for (double chunk_mb : chunks_mb) {
+        if (chunk_mb < 0.0) {
+            std::cerr << "Skipping invalid chunk size: " << chunk_mb << "\n";
+            continue;
+        }
+
+        std::size_t chunk_elements = 0;
+        if (chunk_mb == 0.0) {
+            chunk_elements = total_elements;
+        } else {
+            chunk_elements = static_cast<std::size_t>(
+                (chunk_mb * 1024.0 * 1024.0) / sizeof(T));
+            if (chunk_elements == 0) {
+                chunk_elements = 1;
+            }
+        }
+
+        if (auto_threads && !auto_threads->empty()) {
+            mans::cpu::CsvThreadConfig chosen{};
+            if (mans::cpu::find_nearest_threads(*auto_threads, chunk_elements, chosen)) {
+                apply_auto_thread_config(params, chosen);
+            } else {
+                std::cerr << "No matching thread config found for chunk elements: "
+                          << chunk_elements << "\n";
+            }
+        }
+
+        std::size_t chunk_bytes = chunk_elements * sizeof(T);
+        std::string label = format_chunk_label(chunk_bytes);
+
+        std::string timing_path;
+        if (!timing_csv_base.empty()) {
+            if (timing_per_chunk) {
+                timing_path = timing_csv_base + "." + label + ".timing.csv";
+            } else {
+                timing_path = timing_csv_base;
+            }
+        }
+
+        std::vector<ChunkInfo> chunks = build_chunks<T>(total_elements, chunk_elements);
+        if (chunks.empty()) {
+            std::cerr << "No chunks generated for chunk size: " << chunk_mb << " MB\n";
+            continue;
+        }
+
+        std::vector<std::size_t> chunk_caps(chunks.size(), 0);
+        std::size_t max_comp_bytes = 0;
+        std::size_t max_chunk_len = 0;
+        for (std::size_t i = 0; i < chunks.size(); ++i) {
+            const std::size_t cap = max_mans_chunk_compressed_size<T>(chunks[i].len);
+            if (cap == 0) {
+                std::cerr << "Chunk too large for 32-bit PANS input bound, chunk elements: "
+                          << chunks[i].len << "\n";
+                return 1;
+            }
+            chunk_caps[i] = cap;
+            max_comp_bytes = std::max(max_comp_bytes, cap);
+            max_chunk_len = std::max(max_chunk_len, chunks[i].len);
+        }
+
+        std::vector<std::uint8_t> compressed_chunk(max_comp_bytes);
+        std::vector<std::uint8_t> recovered(max_chunk_len * sizeof(T));
+
+        constexpr int kIters = 11;
+        double total_comp_ms = 0.0;
+        double total_decomp_ms = 0.0;
+        double total_comp_bytes = 0.0;
+
+        MANS_TIMING_RESET();
+        for (int iter = 0; iter < kIters; ++iter) {
+            MANS_TIMING_RUN_SCOPE();
+            RunStats stats = run_once<T>(input, chunks, chunk_caps,
+                                         compressed_chunk, recovered, params);
+            if (!stats.ok) {
+                std::cerr << stats.error << " for chunk " << label << "\n";
+                return 1;
+            }
+            if (iter == 0) {
+                continue;
+            }
+            total_comp_ms += stats.comp_ms;
+            total_decomp_ms += stats.decomp_ms;
+            total_comp_bytes += static_cast<double>(stats.comp_bytes);
+        }
+
+        const double denom = static_cast<double>(kIters - 1);
+        const double avg_comp_ms = total_comp_ms / denom;
+        const double avg_decomp_ms = total_decomp_ms / denom;
+        const double avg_comp_bytes = total_comp_bytes / denom;
+
+        const double ratio = 100.0 * avg_comp_bytes / static_cast<double>(total_bytes);
+        const double comp_mbps =
+            (static_cast<double>(total_bytes) / 1e6) / (avg_comp_ms / 1e3);
+        const double decomp_mbps =
+            (static_cast<double>(total_bytes) / 1e6) / (avg_decomp_ms / 1e3);
+
+        std::cout << std::left << std::setw(8) << label
+                  << " | " << std::setw(8) << std::fixed << std::setprecision(2)
+                  << ratio << "%"
+                  << " | " << std::setw(13) << std::fixed << std::setprecision(1)
+                  << comp_mbps
+                  << " | " << std::setw(13) << std::fixed << std::setprecision(1)
+                  << decomp_mbps
+                  << "\n";
+
+        if (!timing_path.empty()) {
+            MANS_TIMING_DUMP(timing_path);
+        }
+
+        if (csv && *csv) {
+            (*csv) << label << ","
+                   << chunk_bytes << ","
+                   << std::fixed << std::setprecision(2) << ratio << ","
+                   << std::fixed << std::setprecision(1) << comp_mbps << ","
+                   << std::fixed << std::setprecision(1) << decomp_mbps << "\n";
+        }
+    }
+
+    return 0;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    if (argc < 3) {
+        std::cerr << "Usage: " << argv[0]
+                  << " <-u2|-u4> <input.bin> [--chunks 0,0.125,0.25,0.5,1,2,8,256]"
+                  << " [--threshold 4000] [--threads 16,32,32,32,32,32,16,16]"
+                  << " [--csv out.csv]"
+                  << "\n";
+        return 1;
+    }
+
+    std::string input_type = argv[1];
+    std::string input_path = argv[2];
+    std::string chunks_arg = "0.125,0.25,0.5,1,2,8,256";
+    std::string csv_path;
+    std::string threads_arg;
+    bool has_threads = false;
+    uint32_t threshold = 4000;
+
+    for (int i = 3; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--chunks" && i + 1 < argc) {
+            chunks_arg = argv[++i];
+        } else if (arg == "--threads" && i + 1 < argc) {
+            threads_arg = argv[++i];
+            has_threads = true;
+        } else if (arg == "--csv" && i + 1 < argc) {
+            csv_path = argv[++i];
+        } else if (arg == "--threshold" && i + 1 < argc) {
+            threshold = static_cast<uint32_t>(std::stoul(argv[++i]));
+        }
+    }
+
+    std::cout << "Command-line arguments:\n";
+    std::cout << "  Input type: " << input_type << "\n";
+    std::cout << "  Input file: " << input_path << "\n";
+    std::cout << "  Chunks (MB): " << chunks_arg << "\n";
+    std::cout << "  Threshold: " << threshold << "\n";
+    if (has_threads) {
+        std::cout << "  Threads: " << threads_arg << "\n";
+    }
+    if (!csv_path.empty()) {
+        std::cout << "  Timing CSV: " << csv_path << "\n";
+    } else {
+        std::cout << "  Timing CSV: timing.csv\n";
+    }
+    std::cout << "\n";
+
+    const bool is_u2 = (input_type == "-u2" || input_type == "u2");
+    const bool is_u4 = (input_type == "-u4" || input_type == "u4");
+    if (!is_u2 && !is_u4) {
+        std::cerr << "Unknown data type flag: " << input_type
+                  << "\nUse: -u2 or -u4\n";
+        return 1;
+    }
+
+    std::vector<double> chunks_mb = parse_chunks(chunks_arg);
+    if (chunks_mb.empty()) {
+        std::cerr << "No chunk sizes parsed from --chunks.\n";
+        return 1;
+    }
+
+    std::vector<int> thread_list;
     if (has_threads) {
         std::string error;
-        std::vector<int> thread_list = parse_threads(threads_arg, error);
-        if (!error.empty()) {
+        if (!parse_threads(threads_arg, thread_list, error)) {
             std::cerr << error << "\n";
             return 1;
         }
@@ -660,402 +441,90 @@ int main(int argc, char** argv) {
                       << "fill_tail,write_back,restore_signals,decode_values\n";
             return 1;
         }
-        apply_thread_overrides(params, thread_list);
     }
 
-    std::string csv_comp_path;
-    std::string csv_decomp_path;
-    if (!csv_base.empty()) {
-        if (csv_base.size() >= 4 && csv_base.compare(csv_base.size() - 4, 4, ".csv") == 0) {
-            csv_base.erase(csv_base.size() - 4);
+    std::cout << "Chunks (MB): " << chunks_arg << "\n\n";
+
+    std::ofstream csv;
+    std::string timing_csv_base = "timing.csv";
+    bool timing_per_chunk = false;
+    if (!csv_path.empty()) {
+        csv.open(csv_path);
+        if (!csv) {
+            std::cerr << "Failed to open CSV output: " << csv_path << "\n";
+            return 1;
         }
-        csv_comp_path = csv_base + ".comp.csv";
-        csv_decomp_path = csv_base + ".decomp.csv";
-    } else {
-        csv_comp_path = output_file + ".comp.csv";
-        csv_decomp_path = output_file + ".decomp.csv";
+        csv << "chunk_label,chunk_bytes,ratio_pct,comp_mbps,decomp_mbps\n";
+        timing_csv_base = csv_path;
+        timing_per_chunk = true;
     }
 
-    std::cout << kAnsiBold << "Command-line arguments:" << kAnsiReset << "\n";
-    std::cout << "  " << kAnsiCyan << "Input type" << kAnsiReset << ": " << dtype_str << "\n";
-    std::cout << "  " << kAnsiCyan << "Input file" << kAnsiReset << ": " << input_file << "\n";
-    std::cout << "  " << kAnsiCyan << "Output file" << kAnsiReset << ": " << output_file << "\n";
-    std::cout << "  " << kAnsiCyan << "Save ADM" << kAnsiReset << ": "
-              << (save_adm ? kAnsiGreen : kAnsiYellow)
-              << (save_adm ? "yes" : "no") << kAnsiReset << "\n";
-    std::cout << "  " << kAnsiCyan << "Threshold" << kAnsiReset << ": " << threshold << "\n";
-    std::cout << "  " << kAnsiCyan << "Mode" << kAnsiReset << ": "
-              << (mode == BenchMode::Bench
-                      ? "bench"
-                      : (mode == BenchMode::Compress ? "compress" : "decompress"))
+    std::cout << std::left << std::setw(8) << "Chunk"
+              << " | " << std::setw(9) << "Ratio"
+              << " | " << std::setw(13) << "Comp MB/s"
+              << " | " << std::setw(13) << "Decomp MB/s"
               << "\n";
-    if (chunk_mb > 0.0) {
-        std::cout << "  " << kAnsiCyan << "Chunk size (MB)" << kAnsiReset << ": " << chunk_mb << "\n";
-    } else {
-        std::cout << "  " << kAnsiCyan << "Chunk size (MB)" << kAnsiReset << ": full input\n";
-    }
-    if (has_threads) {
-        std::cout << "  " << kAnsiCyan << "Threads" << kAnsiReset << ": " << threads_arg << "\n";
-    }
-    const std::string timing_path = output_file + ".timing.csv";
-    std::cout << "  " << kAnsiCyan << "CSV (compress)" << kAnsiReset << ": " << csv_comp_path << "\n";
-    std::cout << "  " << kAnsiCyan << "CSV (decompress)" << kAnsiReset << ": " << csv_decomp_path << "\n";
-    std::cout << "  " << kAnsiCyan << "Timing CSV" << kAnsiReset << ": " << timing_path << "\n";
-    std::cout << "\n";
+    std::cout << std::string(52, '-') << "\n";
 
-    std::ofstream csv_comp;
-    csv_comp.open(csv_comp_path);
-    if (!csv_comp) {
-        std::cerr << "Failed to open compress CSV output: " << csv_comp_path << "\n";
-        return 1;
-    }
-    csv_comp << "input_bytes,chunk_bytes,comp_bytes,comp_ms,io_read_ms,io_write_ms,"
-                "throughput_mbps,io_ratio,ratio\n";
-
-    std::ofstream csv_decomp;
-    csv_decomp.open(csv_decomp_path);
-    if (!csv_decomp) {
-        std::cerr << "Failed to open decompress CSV output: " << csv_decomp_path << "\n";
-        return 1;
-    }
-    csv_decomp << "input_bytes,output_bytes,chunk_count,decomp_ms,io_read_ms,io_write_ms,"
-                  "throughput_mbps,io_ratio\n";
-
-    constexpr int kIters = 11;
-    double total_comp_ms = 0.0;
-    double total_io_read_ms = 0.0;
-    double total_io_write_ms = 0.0;
-    double total_decomp_ms = 0.0;
-    double total_decomp_io_read_ms = 0.0;
-    double total_decomp_io_write_ms = 0.0;
-    std::size_t input_bytes = 0;
-    std::size_t chunk_bytes = 0;
-    std::size_t comp_bytes = 0;
-    std::size_t output_bytes_size = 0;
-    std::uint64_t chunk_count = 0;
-    bool used_container = false;
-
-    const std::string adm_comp_path = output_file + ".comp.adm";
-    const std::string adm_decomp_path = output_file + ".decomp.adm";
-
-    MANS_TIMING_RESET();
-    for (int iter = 0; iter < kIters; ++iter) {
-        MANS_TIMING_RUN_SCOPE();
-        MANS_TIMING_SCOPE("total");
-        const char* mode_label =
-            (mode == BenchMode::Bench ? "[Bench]"
-                                      : (mode == BenchMode::Compress ? "[Compress]"
-                                                                     : "[Decompress]"));
-        std::cout << "\r" << kAnsiDim << mode_label << " iter "
-                  << (iter + 1) << "/" << kIters << kAnsiReset << std::flush;
-        std::vector<uint8_t> compressed_data;
-        std::vector<uint8_t> decompressed_data;
-        double io_read_ms = 0.0;
-        double io_write_ms = 0.0;
-        double comp_ms = 0.0;
-        double decomp_ms = 0.0;
-        bool ok = false;
-        std::string error;
-
-        if (params.dtype == mans::DataType::U16) {
-            if (mode == BenchMode::Decompress) {
-                if (!load_u8_with_timing(input_file, compressed_data, io_read_ms)) {
-                    std::cerr << kAnsiRed << "Failed to load input file: " << kAnsiReset
-                              << input_file << "\n";
-                    return 1;
-                }
-                if (compressed_data.empty()) {
-                    std::cerr << kAnsiRed << "Input file is empty." << kAnsiReset << "\n";
-                    return 1;
-                }
-                comp_bytes = compressed_data.size();
-                input_bytes = comp_bytes;
-
-                MANS_TIMING_SCOPE("decompress/total");
-                ok = decompress_only<uint16_t>(compressed_data, params,
-                                               save_adm, adm_decomp_path,
-                                               decomp_ms, output_bytes_size,
-                                               chunk_count, used_container,
-                                               decompressed_data, error);
-                if (!ok) {
-                    std::cerr << kAnsiRed << "Decompression failed: " << kAnsiReset << error << "\n";
-                    return 1;
-                }
-                io_write_ms = write_output_with_timing(output_file, decompressed_data);
-                if (io_write_ms < 0.0) {
-                    std::cerr << kAnsiRed << "Failed to write output: " << kAnsiReset
-                              << output_file << "\n";
-                    return 1;
-                }
-            } else {
-                std::vector<uint16_t> host_data;
-                {
-                    MANS_TIMING_SCOPE("compress/total");
-                    if (!load_input_with_timing(input_file, host_data, io_read_ms)) {
-                        std::cerr << kAnsiRed << "Failed to load input file: " << kAnsiReset
-                                  << input_file << "\n";
-                        return 1;
-                    }
-                    if (host_data.empty()) {
-                        std::cerr << kAnsiRed << "Input file is empty." << kAnsiReset << "\n";
-                        return 1;
-                    }
-                    input_bytes = host_data.size() * sizeof(uint16_t);
-
-                    std::size_t chunk_elements_local = 0;
-                    if (chunk_mb > 0.0) {
-                        double chunk_bytes_double = chunk_mb * 1024.0 * 1024.0;
-                        chunk_elements_local =
-                            static_cast<std::size_t>(chunk_bytes_double / sizeof(uint16_t));
-                    }
-                    if (chunk_elements_local == 0) {
-                        chunk_elements_local = host_data.size();
-                    }
-                    chunk_bytes = chunk_elements_local * sizeof(uint16_t);
-
-                    ok = compress_chunks<uint16_t>(host_data, params, chunk_elements_local,
-                                                   save_adm, adm_comp_path,
-                                                   compressed_data, comp_ms);
-                    if (!ok) {
-                        std::cerr << kAnsiRed << "Compression failed." << kAnsiReset << "\n";
-                        return 1;
-                    }
-
-                    io_write_ms = write_output_with_timing(output_file, compressed_data);
-                    if (io_write_ms < 0.0) {
-                        std::cerr << kAnsiRed << "Failed to write output: " << kAnsiReset
-                                  << output_file << "\n";
-                        return 1;
-                    }
-                }
-
-                comp_bytes = compressed_data.size();
-                if (mode == BenchMode::Bench) {
-                    MANS_TIMING_SCOPE("decompress/total");
-                    ok = decompress_and_verify<uint16_t>(compressed_data, host_data, params,
-                                                         save_adm, adm_decomp_path,
-                                                         decomp_ms, output_bytes_size,
-                                                         chunk_count, used_container, error);
-                }
-            }
-        } else {
-            if (mode == BenchMode::Decompress) {
-                if (!load_u8_with_timing(input_file, compressed_data, io_read_ms)) {
-                    std::cerr << kAnsiRed << "Failed to load input file: " << kAnsiReset
-                              << input_file << "\n";
-                    return 1;
-                }
-                if (compressed_data.empty()) {
-                    std::cerr << kAnsiRed << "Input file is empty." << kAnsiReset << "\n";
-                    return 1;
-                }
-                comp_bytes = compressed_data.size();
-                input_bytes = comp_bytes;
-
-                MANS_TIMING_SCOPE("decompress/total");
-                ok = decompress_only<uint32_t>(compressed_data, params,
-                                               save_adm, adm_decomp_path,
-                                               decomp_ms, output_bytes_size,
-                                               chunk_count, used_container,
-                                               decompressed_data, error);
-                if (!ok) {
-                    std::cerr << kAnsiRed << "Decompression failed: " << kAnsiReset << error << "\n";
-                    return 1;
-                }
-                io_write_ms = write_output_with_timing(output_file, decompressed_data);
-                if (io_write_ms < 0.0) {
-                    std::cerr << kAnsiRed << "Failed to write output: " << kAnsiReset
-                              << output_file << "\n";
-                    return 1;
-                }
-            } else {
-                std::vector<uint32_t> host_data;
-                {
-                    MANS_TIMING_SCOPE("compress/total");
-                    if (!load_input_with_timing(input_file, host_data, io_read_ms)) {
-                        std::cerr << kAnsiRed << "Failed to load input file: " << kAnsiReset
-                                  << input_file << "\n";
-                        return 1;
-                    }
-                    if (host_data.empty()) {
-                        std::cerr << kAnsiRed << "Input file is empty." << kAnsiReset << "\n";
-                        return 1;
-                    }
-                    input_bytes = host_data.size() * sizeof(uint32_t);
-
-                    std::size_t chunk_elements_local = 0;
-                    if (chunk_mb > 0.0) {
-                        double chunk_bytes_double = chunk_mb * 1024.0 * 1024.0;
-                        chunk_elements_local =
-                            static_cast<std::size_t>(chunk_bytes_double / sizeof(uint32_t));
-                    }
-                    if (chunk_elements_local == 0) {
-                        chunk_elements_local = host_data.size();
-                    }
-                    chunk_bytes = chunk_elements_local * sizeof(uint32_t);
-
-                    ok = compress_chunks<uint32_t>(host_data, params, chunk_elements_local,
-                                                   save_adm, adm_comp_path,
-                                                   compressed_data, comp_ms);
-                    if (!ok) {
-                        std::cerr << kAnsiRed << "Compression failed." << kAnsiReset << "\n";
-                        return 1;
-                    }
-
-                    io_write_ms = write_output_with_timing(output_file, compressed_data);
-                    if (io_write_ms < 0.0) {
-                        std::cerr << kAnsiRed << "Failed to write output: " << kAnsiReset
-                                  << output_file << "\n";
-                        return 1;
-                    }
-                }
-
-                comp_bytes = compressed_data.size();
-                if (mode == BenchMode::Bench) {
-                    MANS_TIMING_SCOPE("decompress/total");
-                    ok = decompress_and_verify<uint32_t>(compressed_data, host_data, params,
-                                                         save_adm, adm_decomp_path,
-                                                         decomp_ms, output_bytes_size,
-                                                         chunk_count, used_container, error);
-                }
-            }
-        }
-
-        if (!ok) {
-            std::cerr << kAnsiRed << "Decompression failed: " << kAnsiReset << error << "\n";
+    if (is_u2) {
+        std::vector<std::uint16_t> input;
+        if (!load_u16_file(input_path, input)) {
+            std::cerr << "Failed to load input file: " << input_path << "\n";
             return 1;
         }
 
-        if (mode != BenchMode::Decompress) {
-            const double comp_total_ms = comp_ms + io_read_ms + io_write_ms;
-            const double comp_thr_mbps =
-                comp_ms > 0.0 ? (static_cast<double>(input_bytes) / 1e6) / (comp_ms / 1e3) : 0.0;
-            const double comp_io_ratio =
-                comp_total_ms > 0.0 ? (io_read_ms + io_write_ms) / comp_total_ms : 0.0;
-            const double comp_ratio =
-                input_bytes > 0 ? static_cast<double>(comp_bytes) / static_cast<double>(input_bytes)
-                                : 0.0;
-            csv_comp << input_bytes << ","
-                     << chunk_bytes << ","
-                     << comp_bytes << ","
-                     << std::fixed << std::setprecision(3) << comp_ms << ","
-                     << std::fixed << std::setprecision(3) << io_read_ms << ","
-                     << std::fixed << std::setprecision(3) << io_write_ms << ","
-                     << std::fixed << std::setprecision(2) << comp_thr_mbps << ","
-                     << std::fixed << std::setprecision(4) << comp_io_ratio << ","
-                     << std::fixed << std::setprecision(4) << comp_ratio << "\n";
+        mans::MansParams params{};
+        init_params<std::uint16_t>(params);
+        params.adm_threshold = threshold;
+        if (has_threads) {
+            apply_thread_overrides(params, thread_list);
         }
-
-        if (mode != BenchMode::Compress) {
-            const double decomp_thr_mbps =
-                decomp_ms > 0.0 ? (static_cast<double>(output_bytes_size) / 1e6) / (decomp_ms / 1e3)
-                                : 0.0;
-            const double decomp_io_read_ms = (mode == BenchMode::Decompress) ? io_read_ms : 0.0;
-            const double decomp_io_write_ms = (mode == BenchMode::Decompress) ? io_write_ms : 0.0;
-            const double decomp_total_ms = decomp_ms + decomp_io_read_ms + decomp_io_write_ms;
-            const double decomp_io_ratio =
-                decomp_total_ms > 0.0 ? (decomp_io_read_ms + decomp_io_write_ms) / decomp_total_ms : 0.0;
-
-            csv_decomp << comp_bytes << ","
-                       << output_bytes_size << ","
-                       << chunk_count << ","
-                       << std::fixed << std::setprecision(3) << decomp_ms << ","
-                       << std::fixed << std::setprecision(3) << decomp_io_read_ms << ","
-                       << std::fixed << std::setprecision(3) << decomp_io_write_ms << ","
-                       << std::fixed << std::setprecision(2) << decomp_thr_mbps << ","
-                       << std::fixed << std::setprecision(4) << decomp_io_ratio << "\n";
-        }
-
-        if (iter == 0) {
-            continue;
-        }
-        if (mode != BenchMode::Decompress) {
-            total_comp_ms += comp_ms;
-            total_io_read_ms += io_read_ms;
-            total_io_write_ms += io_write_ms;
-        }
-        if (mode != BenchMode::Compress) {
-            total_decomp_ms += decomp_ms;
-            if (mode == BenchMode::Decompress) {
-                total_decomp_io_read_ms += io_read_ms;
-                total_decomp_io_write_ms += io_write_ms;
+        const char* csv_env = std::getenv("MANS_THREAD_CSV");
+        std::string auto_thread_csv =
+            (csv_env && csv_env[0] != '\0') ? csv_env : "best_threads.csv";
+        std::vector<mans::cpu::CsvThreadConfig> auto_thread_configs;
+        bool use_auto_threads = false;
+        if (!has_threads) {
+            std::string error;
+            if (!mans::cpu::load_thread_csv(auto_thread_csv, auto_thread_configs, error)) {
+                std::cerr << "Auto thread config disabled: " << error << "\n";
+            } else {
+                use_auto_threads = true;
             }
         }
-    }
-    std::cout << "\n";
-
-    const double denom = static_cast<double>(kIters - 1);
-
-    std::cout << kAnsiBold << "Mans bench finished!" << kAnsiReset
-              << " Output: " << output_file << "\n";
-    std::cout << kAnsiDim << "Config: " << kAnsiReset
-              << "dtype=" << dtype_str
-              << ", threshold=" << threshold
-              << ", chunk_bytes=" << chunk_bytes
-              << ", format=" << (used_container ? "container" : "legacy")
-              << ", chunk_count=" << chunk_count
-              << "\n";
-
-    if (mode != BenchMode::Decompress) {
-        const double avg_comp_ms = total_comp_ms / denom;
-        const double avg_io_read_ms = total_io_read_ms / denom;
-        const double avg_io_write_ms = total_io_write_ms / denom;
-        const double total_comp_ms_with_io = avg_comp_ms + avg_io_read_ms + avg_io_write_ms;
-        const double throughput_comp_mbps =
-            (static_cast<double>(input_bytes) / 1e6) / (avg_comp_ms / 1e3);
-        const double comp_ratio =
-            input_bytes > 0 ? static_cast<double>(comp_bytes) / static_cast<double>(input_bytes) : 0.0;
-        const double comp_io_ratio =
-            total_comp_ms_with_io > 0.0
-                ? (avg_io_read_ms + avg_io_write_ms) / total_comp_ms_with_io
-                : 0.0;
-
-        std::cout << kAnsiBold << "Compress" << kAnsiReset << "\n";
-        std::cout << "  " << kAnsiBlue << "Avg comp ms" << kAnsiReset << ": "
-                  << std::fixed << std::setprecision(3) << avg_comp_ms
-                  << ", " << kAnsiBlue << "Avg IO read ms" << kAnsiReset << ": "
-                  << avg_io_read_ms
-                  << ", " << kAnsiBlue << "Avg IO write ms" << kAnsiReset << ": "
-                  << avg_io_write_ms << "\n";
-        std::cout << "  " << kAnsiGreen << "Throughput (MB/s, comp only)" << kAnsiReset << ": "
-                  << std::fixed << std::setprecision(2) << throughput_comp_mbps
-                  << ", " << kAnsiYellow << "IO ratio" << kAnsiReset << ": "
-                  << std::fixed << std::setprecision(4) << comp_io_ratio
-                  << ", " << kAnsiYellow << "Ratio" << kAnsiReset << ": "
-                  << std::fixed << std::setprecision(4) << comp_ratio
-                  << "\n";
-    }
-
-    if (mode != BenchMode::Compress) {
-        const double avg_decomp_ms = total_decomp_ms / denom;
-        const double avg_decomp_io_read_ms = total_decomp_io_read_ms / denom;
-        const double avg_decomp_io_write_ms = total_decomp_io_write_ms / denom;
-        const double decomp_total_ms = avg_decomp_ms + avg_decomp_io_read_ms + avg_decomp_io_write_ms;
-        const double throughput_decomp_mbps =
-            (static_cast<double>(output_bytes_size) / 1e6) / (avg_decomp_ms / 1e3);
-        const double decomp_io_ratio =
-            decomp_total_ms > 0.0
-                ? (avg_decomp_io_read_ms + avg_decomp_io_write_ms) / decomp_total_ms
-                : 0.0;
-
-        std::cout << kAnsiBold << "Decompress" << kAnsiReset << "\n";
-        std::cout << "  " << kAnsiBlue << "Avg decomp ms" << kAnsiReset << ": "
-                  << std::fixed << std::setprecision(3) << avg_decomp_ms;
-        if (mode == BenchMode::Decompress) {
-            std::cout << ", " << kAnsiBlue << "Avg IO read ms" << kAnsiReset << ": "
-                      << avg_decomp_io_read_ms
-                      << ", " << kAnsiBlue << "Avg IO write ms" << kAnsiReset << ": "
-                      << avg_decomp_io_write_ms;
+        return run_bench_for_type<std::uint16_t>(input, chunks_mb, params, &csv,
+                                                 timing_csv_base, timing_per_chunk,
+                                                 use_auto_threads ? &auto_thread_configs
+                                                                  : nullptr);
+    } else {
+        std::vector<std::uint32_t> input;
+        if (!load_u32_file(input_path, input)) {
+            std::cerr << "Failed to load input file: " << input_path << "\n";
+            return 1;
         }
-        std::cout << "\n";
-        std::cout << "  " << kAnsiGreen << "Throughput (MB/s, decomp only)" << kAnsiReset << ": "
-                  << std::fixed << std::setprecision(2) << throughput_decomp_mbps
-                  << ", " << kAnsiYellow << "IO ratio" << kAnsiReset << ": "
-                  << std::fixed << std::setprecision(4) << decomp_io_ratio
-                  << "\n";
+
+        mans::MansParams params{};
+        init_params<std::uint32_t>(params);
+        params.adm_threshold = threshold;
+        if (has_threads) {
+            apply_thread_overrides(params, thread_list);
+        }
+        const char* csv_env = std::getenv("MANS_THREAD_CSV");
+        std::string auto_thread_csv =
+            (csv_env && csv_env[0] != '\0') ? csv_env : "best_threads.csv";
+        std::vector<mans::cpu::CsvThreadConfig> auto_thread_configs;
+        bool use_auto_threads = false;
+        if (!has_threads) {
+            std::string error;
+            if (!mans::cpu::load_thread_csv(auto_thread_csv, auto_thread_configs, error)) {
+                std::cerr << "Auto thread config disabled: " << error << "\n";
+            } else {
+                use_auto_threads = true;
+            }
+        }
+        return run_bench_for_type<std::uint32_t>(input, chunks_mb, params, &csv,
+                                                 timing_csv_base, timing_per_chunk,
+                                                 use_auto_threads ? &auto_thread_configs
+                                                                  : nullptr);
     }
-
-    MANS_TIMING_DUMP(timing_path);
-
-    return 0;
 }
