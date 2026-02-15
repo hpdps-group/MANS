@@ -411,7 +411,7 @@ int main(int argc, char** argv) {
     if (!csv_path.empty()) {
         std::cout << "  Timing CSV: " << csv_path << "\n";
     } else {
-        std::cout << "  Timing CSV: timing.csv\n";
+        std::cout << "  Timing CSV: mans_timing.csv\n";
     }
     std::cout << "\n";
 
@@ -446,7 +446,7 @@ int main(int argc, char** argv) {
     std::cout << "Chunks (MB): " << chunks_arg << "\n\n";
 
     std::ofstream csv;
-    std::string timing_csv_base = "timing.csv";
+    std::string timing_csv_base = "mans_timing.csv";
     bool timing_per_chunk = false;
     if (!csv_path.empty()) {
         csv.open(csv_path);

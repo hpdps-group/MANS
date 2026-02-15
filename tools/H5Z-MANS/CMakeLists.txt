@@ -114,3 +114,39 @@ target_link_libraries(none_read PRIVATE ${HDF5_LIBRARIES} MPI::MPI_C)
 set_target_properties(none_read PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/h5z-mans
 )
+
+# =========================================================
+# Target 8: sz3_write (minimal MPI SZ3 compressed write test)
+# =========================================================
+add_executable(sz3_write test/sz3_write.cpp)
+target_link_libraries(sz3_write PRIVATE ${HDF5_LIBRARIES} MPI::MPI_C)
+set_target_properties(sz3_write PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/h5z-mans
+)
+
+# =========================================================
+# Target 9: sz3_read (minimal MPI SZ3 compressed read test)
+# =========================================================
+add_executable(sz3_read test/sz3_read.cpp)
+target_link_libraries(sz3_read PRIVATE ${HDF5_LIBRARIES} MPI::MPI_C)
+set_target_properties(sz3_read PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/h5z-mans
+)
+
+# =========================================================
+# Target 10: zstd_write (minimal MPI Zstd compressed write test)
+# =========================================================
+add_executable(zstd_write test/zstd_write.cpp)
+target_link_libraries(zstd_write PRIVATE ${HDF5_LIBRARIES} MPI::MPI_C)
+set_target_properties(zstd_write PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/h5z-mans
+)
+
+# =========================================================
+# Target 11: zstd_read (minimal MPI Zstd compressed read test)
+# =========================================================
+add_executable(zstd_read test/zstd_read.cpp)
+target_link_libraries(zstd_read PRIVATE ${HDF5_LIBRARIES} MPI::MPI_C)
+set_target_properties(zstd_read PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/h5z-mans
+)
