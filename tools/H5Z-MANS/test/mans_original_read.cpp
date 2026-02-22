@@ -14,7 +14,7 @@ int main(int argc, char** argv) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
     auto stage = [&](const char* msg) {
-        if (rank == 0) std::printf("[mans-original-read] %s\n", msg);
+        if (rank == 0) std::printf("[mans_original_read] %s\n", msg);
     };
 
     stage("opening input hdf5");
@@ -71,7 +71,7 @@ int main(int argc, char** argv) {
         double mib = total_bytes / (1024.0 * 1024.0);
         double bw = (max_sec > 0.0) ? (mib / max_sec) : 0.0;
         double per_rank_approx = (nprocs > 0) ? (bw / (double)nprocs) : 0.0;
-        std::printf("mans-original-read ranks=%d total=%.1f MiB time=%.4f s throughput=%.2f MiB/s per_rank~%.2f MiB/s\n",
+        std::printf("mans_original_read ranks=%d total=%.1f MiB time=%.4f s throughput=%.2f MiB/s per_rank~%.2f MiB/s\n",
                     nprocs, mib, max_sec, bw, per_rank_approx);
     }
     MPI_Finalize();

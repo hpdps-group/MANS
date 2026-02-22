@@ -80,20 +80,20 @@ set_target_properties(mans_read PROPERTIES
 )
 
 # =========================================================
-# Target 5b: mans-original-write (minimal MPI compressed write test)
+# Target 5b: mans_original_write (minimal MPI compressed write test)
 # =========================================================
-add_executable(mans-original-write test/mans-original-write.cpp)
-target_link_libraries(mans-original-write PRIVATE ${HDF5_LIBRARIES} MPI::MPI_C)
-set_target_properties(mans-original-write PROPERTIES
+add_executable(mans_original_write test/mans_original_write.cpp)
+target_link_libraries(mans_original_write PRIVATE ${HDF5_LIBRARIES} MPI::MPI_C)
+set_target_properties(mans_original_write PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/h5z-mans
 )
 
 # =========================================================
-# Target 5c: mans-original-read (minimal MPI compressed read test)
+# Target 5c: mans_original_read (minimal MPI compressed read test)
 # =========================================================
-add_executable(mans-original-read test/mans-original-read.cpp)
-target_link_libraries(mans-original-read PRIVATE ${HDF5_LIBRARIES} MPI::MPI_C)
-set_target_properties(mans-original-read PROPERTIES
+add_executable(mans_original_read test/mans_original_read.cpp)
+target_link_libraries(mans_original_read PRIVATE ${HDF5_LIBRARIES} MPI::MPI_C)
+set_target_properties(mans_original_read PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/h5z-mans
 )
 
@@ -148,5 +148,23 @@ set_target_properties(zstd_write PROPERTIES
 add_executable(zstd_read test/zstd_read.cpp)
 target_link_libraries(zstd_read PRIVATE ${HDF5_LIBRARIES} MPI::MPI_C)
 set_target_properties(zstd_read PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/h5z-mans
+)
+
+# =========================================================
+# Target 12: fse_write (minimal MPI FSE compressed write test)
+# =========================================================
+add_executable(fse_write test/fse_write.cpp)
+target_link_libraries(fse_write PRIVATE ${HDF5_LIBRARIES} MPI::MPI_C)
+set_target_properties(fse_write PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/h5z-mans
+)
+
+# =========================================================
+# Target 13: fse_read (minimal MPI FSE compressed read test)
+# =========================================================
+add_executable(fse_read test/fse_read.cpp)
+target_link_libraries(fse_read PRIVATE ${HDF5_LIBRARIES} MPI::MPI_C)
+set_target_properties(fse_read PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/h5z-mans
 )
