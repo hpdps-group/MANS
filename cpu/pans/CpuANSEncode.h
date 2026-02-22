@@ -932,7 +932,7 @@ void ansEncode(
   }
   else{
     MANS_TIMING_START("pans/histogram2");
-  ansHistogram_v4(
+  ansHistogram_v1(
       in,
       inSize,
       tempHistogram);
