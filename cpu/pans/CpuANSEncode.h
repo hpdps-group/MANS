@@ -922,7 +922,8 @@ void ansEncode(
   // printf("uncompressedWords:%d\n",uncompressedWords);
     
 //   auto start = std::chrono::high_resolution_clock::now();
-  if(inSize > 2621440 * 2){
+  if(inSize > 64*1024){
+//   if(inSize > 2621440 * 2){   
     MANS_TIMING_START("pans/histogram1");
     ansHistogram_v4(
       in,
