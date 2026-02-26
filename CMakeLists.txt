@@ -124,7 +124,7 @@ if(BUILD_CPU)
       RUNTIME_OUTPUT_DIRECTORY ${cpu_root_binary_dir}
   )
   target_compile_options(cpu_mans_bench PRIVATE $<$<CONFIG:Release>:-O3>)
-  target_link_libraries(cpu_mans_bench PRIVATE mans_cpu_core OpenMP::OpenMP_CXX)
+  target_link_libraries(cpu_mans_bench PRIVATE mans_common mans_cpu_core OpenMP::OpenMP_CXX)
 
   # mans autotune：build/cpu/cpu_mans_autotune
   add_executable(cpu_mans_autotune

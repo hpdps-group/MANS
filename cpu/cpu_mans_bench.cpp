@@ -1,13 +1,8 @@
-#include "adm/adm_utils.h"
-#include "adm/adm.h"
-#include "pans/CpuANSUtils.h"
 #include "mans_cpu.h"
 #include "file_utils.h"
+#include "../mans_api.hpp"
 #include "../mans_defs.h"
 #include "../mans_timing.h"
-extern "C" {
-#include "fse/include/fse.h"
-}
 
 #include <algorithm>
 #include <chrono>
@@ -134,25 +129,22 @@ std::vector<ChunkInfo> build_chunks(std::size_t total_elements, std::size_t chun
 
 template <typename T>
 std::size_t max_mans_chunk_compressed_size(std::size_t chunk_elements, std::uint32_t mode) {
-    const std::size_t raw_bytes = chunk_elements * sizeof(T);
-    const std::size_t adm_bound = adm_max_compressed_size<T>(chunk_elements);
-    if (mode == mans::Mode::R) {
-        const std::size_t fse_raw = FSE_compressBound(raw_bytes);
-        const std::size_t fse_adm = FSE_compressBound(adm_bound);
-        if (fse_raw == 0 || fse_adm == 0) {
-            return 0;
-        }
-        return 1 + std::max(fse_raw, fse_adm);
-    }
-
-    const std::size_t max_stage2_input = std::max(raw_bytes, adm_bound);
-    if (max_stage2_input >
-        static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+    mans::MansParams bound_params{};
+    bound_params.backend = mans::Backend::CPU;
+    bound_params.mode = (mode == mans::Mode::R) ? mans::Mode::R : mans::Mode::P;
+    if constexpr (std::is_same_v<T, std::uint16_t>) {
+        bound_params.dtype = mans::DataType::U16;
+    } else if constexpr (std::is_same_v<T, std::uint32_t>) {
+        bound_params.dtype = mans::DataType::U32;
+    } else {
         return 0;
     }
-    return 1 + static_cast<std::size_t>(
-                   cpu_ans::getMaxCompressedSize(
-                       static_cast<std::uint32_t>(max_stage2_input)));
+
+    try {
+        return mans::get_mans_max_compress_bytes(chunk_elements, bound_params);
+    } catch (const std::exception&) {
+        return 0;
+    }
 }
 
 template <typename T>

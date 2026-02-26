@@ -21,6 +21,9 @@ include_directories(
 # Build a shared library named libH5Z-MANS.so; HDF5 will automatically load it at runtime.
 add_library(H5Z-MANS SHARED src/H5Z-MANS.cpp)
 target_link_libraries(H5Z-MANS PRIVATE mans_common ${HDF5_LIBRARIES} $<$<BOOL:${HDF5_PREFER_PARALLEL}>:MPI::MPI_C>)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_link_options(H5Z-MANS PRIVATE -Wl,-Bsymbolic)
+endif()
 set_target_properties(H5Z-MANS PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/plugins
     OUTPUT_NAME "H5Z-MANS"

@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
 
 namespace mans {
@@ -45,9 +46,12 @@ namespace Mode {
 }
 
 struct MansHeader {
-    std::uint8_t codec;  // 1 = ADM payload, 2 = RAW payload
+    std::uint8_t codec;            // 1 = ADM payload, 2 = RAW payload
+    std::uint8_t mode;             // 0 = p-mode, 1 = r-mode
+    std::uint8_t raw_bytes_le[8];  // little-endian raw byte length
 };
-// Static assertion: ensure the compiler doesn't add padding so it remains 1 byte in size
-static_assert(sizeof(MansHeader) == 1, "MansHeader must be 1 byte");
+static_assert(sizeof(MansHeader) == 10, "MansHeader must be 10 bytes");
+
+constexpr std::size_t kMansHeaderBytes = sizeof(MansHeader);
 
 } // namespace mans
