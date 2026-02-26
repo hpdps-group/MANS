@@ -25,7 +25,7 @@ struct MansParams {
     // --- Pipeline mode ---
     // 0: p-mode (ADM -> PANS)
     // 1: r-mode (ADM -> FSE)
-    uint32_t mode = 0;
+    uint32_t mode = 1;
 };
     
 static_assert(sizeof(MansParams) % 4 == 0, "MansParams size must be multiple of 4 bytes");
