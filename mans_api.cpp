@@ -12,6 +12,10 @@
     #include "cpu/adm/adm.h"
     #include "cpu/pans/CpuANSUtils.h"
     #include "cpu/pans/pans_utils.h"
+    #include "cpu/fse/fse_utils.h"
+    extern "C" {
+        #include "cpu/fse/include/fse.h"
+    }
 #endif
 
 #ifdef MANS_ENABLE_NV
@@ -88,7 +92,7 @@ void decompress(const void* input_data,
     throw std::runtime_error("MANS::decompress: Unknown backend type.");
 }
 
-std::size_t get_mans_max_compress_bytes_p(std::size_t num_elements, const MansParams& params) {
+std::size_t get_mans_max_compress_bytes(std::size_t num_elements, const MansParams& params) {
     if (num_elements == 0) {
         return 0;
     }
@@ -101,16 +105,16 @@ std::size_t get_mans_max_compress_bytes_p(std::size_t num_elements, const MansPa
         } else if (params.dtype == DataType::U32) {
             elem_size = sizeof(std::uint32_t);
         } else {
-            throw std::runtime_error("MANS::get_mans_max_compress_bytes_p: Unsupported dtype.");
+            throw std::runtime_error("MANS::get_mans_max_compress_bytes: Unsupported dtype.");
         }
 
         const std::size_t max_u32 = std::numeric_limits<uint32_t>::max();
         if (num_elements > max_u32 / elem_size) {
-            throw std::runtime_error("MANS::get_mans_max_compress_bytes_p: raw_bytes exceeds 32-bit limit.");
+            throw std::runtime_error("MANS::get_mans_max_compress_bytes: raw_bytes exceeds 32-bit limit.");
         }
         const std::size_t raw_bytes = num_elements * elem_size;
         if (raw_bytes > max_u32) {
-            throw std::runtime_error("MANS::get_mans_max_compress_bytes_p: raw_bytes exceeds 32-bit limit.");
+            throw std::runtime_error("MANS::get_mans_max_compress_bytes: raw_bytes exceeds 32-bit limit.");
         }
 
         std::size_t adm_bytes = 0;
@@ -120,39 +124,51 @@ std::size_t get_mans_max_compress_bytes_p(std::size_t num_elements, const MansPa
             adm_bytes = adm_max_compressed_size<std::uint32_t>(num_elements);
         }
         if (adm_bytes > max_u32) {
-            throw std::runtime_error("MANS::get_mans_max_compress_bytes_p: adm_bytes exceeds 32-bit limit.");
+            throw std::runtime_error("MANS::get_mans_max_compress_bytes: adm_bytes exceeds 32-bit limit.");
         }
 
         const std::size_t pans_raw =
             static_cast<std::size_t>(cpu_ans::getMaxCompressedSize(static_cast<uint32_t>(raw_bytes)));
         const std::size_t pans_adm =
             static_cast<std::size_t>(cpu_ans::getMaxCompressedSize(static_cast<uint32_t>(adm_bytes)));
+        const std::size_t fse_raw = FSE_compressBound(raw_bytes);
+        const std::size_t fse_adm = FSE_compressBound(adm_bytes);
+        if (fse_raw == 0 || fse_adm == 0) {
+            throw std::runtime_error("MANS::get_mans_max_compress_bytes: FSE_compressBound overflow.");
+        }
 
-        return 1 + std::max(pans_raw, pans_adm); // 1 byte for codec header
+        const std::uint32_t mode = (params.mode == Mode::R) ? Mode::R : Mode::P;
+        if (mode == Mode::P) {
+            return 1 + std::max(pans_raw, pans_adm); // 1 byte for codec header
+        }
+        if (mode == Mode::R) {
+            return 1 + std::max(fse_raw, fse_adm); // 1 byte for codec header
+        }
+        throw std::runtime_error("MANS::get_mans_max_compress_bytes: Unknown mode.");
 #else
-        throw std::runtime_error("MANS::get_mans_max_compress_bytes_p: CPU backend was NOT compiled.");
+        throw std::runtime_error("MANS::get_mans_max_compress_bytes: CPU backend was NOT compiled.");
 #endif
     }
 
     if (params.backend == Backend::NVIDIA) {
 #ifdef MANS_ENABLE_NV
-        throw std::runtime_error("MANS::get_mans_max_compress_bytes_p: NVIDIA backend not implemented yet.");
+        throw std::runtime_error("MANS::get_mans_max_compress_bytes: NVIDIA backend not implemented yet.");
 #else
-        throw std::runtime_error("MANS::get_mans_max_compress_bytes_p: NVIDIA backend was NOT compiled.");
+        throw std::runtime_error("MANS::get_mans_max_compress_bytes: NVIDIA backend was NOT compiled.");
 #endif
     }
 
-    throw std::runtime_error("MANS::get_mans_max_compress_bytes_p: Unknown backend type.");
+    throw std::runtime_error("MANS::get_mans_max_compress_bytes: Unknown backend type.");
 }
 
-std::size_t get_mans_exact_decompress_bytes_p(const void* compressed_data,
-                                              std::size_t compressed_len,
-                                              const MansParams& params) {
+std::size_t get_mans_exact_decompress_bytes(const void* compressed_data,
+                                            std::size_t compressed_len,
+                                            const MansParams& params) {
     if (!compressed_data) {
-        throw std::runtime_error("MANS::get_mans_exact_decompress_bytes_p: compressed_data is null.");
+        throw std::runtime_error("MANS::get_mans_exact_decompress_bytes: compressed_data is null.");
     }
     if (compressed_len < 1) {
-        throw std::runtime_error("MANS::get_mans_exact_decompress_bytes_p: compressed_len too small.");
+        throw std::runtime_error("MANS::get_mans_exact_decompress_bytes: compressed_len too small.");
     }
 
     if (params.backend == Backend::CPU) {
@@ -160,35 +176,55 @@ std::size_t get_mans_exact_decompress_bytes_p(const void* compressed_data,
         const auto* bytes = static_cast<const std::uint8_t*>(compressed_data);
         const std::uint8_t codec = bytes[0];
         if (compressed_len <= 1) {
-            throw std::runtime_error("MANS::get_mans_exact_decompress_bytes_p: missing PANS payload.");
+            throw std::runtime_error("MANS::get_mans_exact_decompress_bytes: missing payload.");
         }
 
-        const std::uint8_t* pans_ptr = bytes + 1;
-        const std::size_t pans_len = compressed_len - 1;
+        const std::uint8_t* payload_ptr = bytes + 1;
+        const std::size_t payload_len = compressed_len - 1;
+        const std::uint32_t mode = (params.mode == Mode::R) ? Mode::R : Mode::P;
 
-        std::size_t pans_compress_len = 0;
-        std::size_t pans_decompress_len = 0;
-        get_compress_and_decompressed_len(pans_ptr, pans_compress_len, pans_decompress_len);
-        if (pans_decompress_len == 0) {
-            throw std::runtime_error("MANS::get_mans_exact_decompress_bytes_p: failed to parse PANS header.");
-        }
-        if (pans_compress_len > pans_len) {
-            throw std::runtime_error("MANS::get_mans_exact_decompress_bytes_p: PANS payload truncated.");
+        std::size_t stage2_compress_len = 0;
+        std::size_t stage2_decompress_len = 0;
+        if (mode == Mode::P) {
+            stage2_compress_len = payload_len;
+            get_compress_and_decompressed_len(payload_ptr, stage2_compress_len, stage2_decompress_len);
+            if (stage2_decompress_len == 0 || stage2_compress_len != payload_len) {
+                throw std::runtime_error("MANS::get_mans_exact_decompress_bytes: failed to parse PANS payload.");
+            }
+        } else if (mode == Mode::R) {
+            std::string parse_error;
+            if (!mans::cpu::get_fse_compress_and_decompressed_len(payload_ptr, payload_len,
+                                                                  stage2_compress_len,
+                                                                  stage2_decompress_len,
+                                                                  &parse_error)) {
+                throw std::runtime_error(
+                    "MANS::get_mans_exact_decompress_bytes: failed to parse FSE payload: " +
+                    parse_error);
+            }
+            if (stage2_compress_len != payload_len) {
+                throw std::runtime_error("MANS::get_mans_exact_decompress_bytes: FSE payload truncated.");
+            }
+        } else {
+            throw std::runtime_error("MANS::get_mans_exact_decompress_bytes: unknown mode.");
         }
 
         if (codec == 2) {
-            return pans_decompress_len; // direct PANS -> raw bytes
+            return stage2_decompress_len; // direct payload -> raw bytes
         }
         if (codec != 1) {
-            throw std::runtime_error("MANS::get_mans_exact_decompress_bytes_p: unknown codec.");
+            throw std::runtime_error("MANS::get_mans_exact_decompress_bytes: unknown codec.");
         }
 
-        std::vector<std::uint8_t> adm_blob(pans_decompress_len);
-        std::size_t out_len = 0;
-        double dur = 0.0;
-        pans_decompress(pans_ptr, pans_len, adm_blob.data(), out_len, dur);
-        if (out_len < sizeof(adm::FileHeader)) {
-            throw std::runtime_error("MANS::get_mans_exact_decompress_bytes_p: ADM header too small.");
+        std::vector<std::uint8_t> adm_blob(stage2_decompress_len);
+        std::size_t adm_blob_len = stage2_decompress_len;
+        double stage2_dur = 0.0;
+        if (mode == Mode::P) {
+            pans_decompress(payload_ptr, payload_len, adm_blob.data(), adm_blob_len, stage2_dur);
+        } else {
+            mans::cpu::fse_decompress(payload_ptr, payload_len, adm_blob.data(), adm_blob_len, stage2_dur);
+        }
+        if (adm_blob_len < sizeof(adm::FileHeader)) {
+            throw std::runtime_error("MANS::get_mans_exact_decompress_bytes: ADM header too small.");
         }
 
         const auto* hdr = reinterpret_cast<const adm::FileHeader*>(adm_blob.data());
@@ -198,28 +234,28 @@ std::size_t get_mans_exact_decompress_bytes_p(const void* compressed_data,
         } else if (params.dtype == DataType::U32) {
             elem_size = sizeof(std::uint32_t);
         } else {
-            throw std::runtime_error("MANS::get_mans_exact_decompress_bytes_p: Unsupported dtype.");
+            throw std::runtime_error("MANS::get_mans_exact_decompress_bytes: Unsupported dtype.");
         }
 
         const std::size_t max_size = std::numeric_limits<std::size_t>::max();
         if (hdr->num_elements > max_size / elem_size) {
-            throw std::runtime_error("MANS::get_mans_exact_decompress_bytes_p: size overflow.");
+            throw std::runtime_error("MANS::get_mans_exact_decompress_bytes: size overflow.");
         }
         return static_cast<std::size_t>(hdr->num_elements) * elem_size;
 #else
-        throw std::runtime_error("MANS::get_mans_exact_decompress_bytes_p: CPU backend was NOT compiled.");
+        throw std::runtime_error("MANS::get_mans_exact_decompress_bytes: CPU backend was NOT compiled.");
 #endif
     }
 
     if (params.backend == Backend::NVIDIA) {
 #ifdef MANS_ENABLE_NV
-        throw std::runtime_error("MANS::get_mans_exact_decompress_bytes_p: NVIDIA backend not implemented yet.");
+        throw std::runtime_error("MANS::get_mans_exact_decompress_bytes: NVIDIA backend not implemented yet.");
 #else
-        throw std::runtime_error("MANS::get_mans_exact_decompress_bytes_p: NVIDIA backend was NOT compiled.");
+        throw std::runtime_error("MANS::get_mans_exact_decompress_bytes: NVIDIA backend was NOT compiled.");
 #endif
     }
 
-    throw std::runtime_error("MANS::get_mans_exact_decompress_bytes_p: Unknown backend type.");
+    throw std::runtime_error("MANS::get_mans_exact_decompress_bytes: Unknown backend type.");
 }
 
 } // namespace mans

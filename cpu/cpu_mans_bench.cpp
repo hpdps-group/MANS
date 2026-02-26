@@ -5,6 +5,9 @@
 #include "file_utils.h"
 #include "../mans_defs.h"
 #include "../mans_timing.h"
+extern "C" {
+#include "fse/include/fse.h"
+}
 
 #include <algorithm>
 #include <chrono>
@@ -130,17 +133,26 @@ std::vector<ChunkInfo> build_chunks(std::size_t total_elements, std::size_t chun
 }
 
 template <typename T>
-std::size_t max_mans_chunk_compressed_size(std::size_t chunk_elements) {
+std::size_t max_mans_chunk_compressed_size(std::size_t chunk_elements, std::uint32_t mode) {
     const std::size_t raw_bytes = chunk_elements * sizeof(T);
     const std::size_t adm_bound = adm_max_compressed_size<T>(chunk_elements);
-    const std::size_t max_pans_input_bytes = std::max(raw_bytes, adm_bound);
-    if (max_pans_input_bytes >
+    if (mode == mans::Mode::R) {
+        const std::size_t fse_raw = FSE_compressBound(raw_bytes);
+        const std::size_t fse_adm = FSE_compressBound(adm_bound);
+        if (fse_raw == 0 || fse_adm == 0) {
+            return 0;
+        }
+        return 1 + std::max(fse_raw, fse_adm);
+    }
+
+    const std::size_t max_stage2_input = std::max(raw_bytes, adm_bound);
+    if (max_stage2_input >
         static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
         return 0;
     }
     return 1 + static_cast<std::size_t>(
                    cpu_ans::getMaxCompressedSize(
-                       static_cast<std::uint32_t>(max_pans_input_bytes)));
+                       static_cast<std::uint32_t>(max_stage2_input)));
 }
 
 template <typename T>
@@ -215,21 +227,6 @@ RunStats run_once(const std::vector<T>& input,
 }
 
 template <typename T>
-void init_params(mans::MansParams& params) {
-    params.backend = mans::Backend::CPU;
-    params.dtype = std::is_same_v<T, std::uint16_t> ? mans::DataType::U16 : mans::DataType::U32;
-    params.adm_threshold = 4000;
-    params.adm_decide_threads = 16;
-    params.adm_center_calc_threads = 32;
-    params.adm_encode_threads = 32;
-    params.adm_warp_reduce_threads = 32;
-    params.adm_fill_tail_threads = 32;
-    params.adm_write_back_threads = 32;
-    params.adm_restore_signals_threads = 32;
-    params.adm_decode_values_threads = 32;
-}
-
-template <typename T>
 int run_bench_for_type(const std::vector<T>& input,
                        const std::vector<double>& chunks_mb,
                        mans::MansParams& params,
@@ -294,7 +291,7 @@ int run_bench_for_type(const std::vector<T>& input,
         std::size_t max_comp_bytes = 0;
         std::size_t max_chunk_len = 0;
         for (std::size_t i = 0; i < chunks.size(); ++i) {
-            const std::size_t cap = max_mans_chunk_compressed_size<T>(chunks[i].len);
+            const std::size_t cap = max_mans_chunk_compressed_size<T>(chunks[i].len, params.mode);
             if (cap == 0) {
                 std::cerr << "Chunk too large for 32-bit PANS input bound, chunk elements: "
                           << chunks[i].len << "\n";
@@ -372,6 +369,7 @@ int main(int argc, char** argv) {
     if (argc < 3) {
         std::cerr << "Usage: " << argv[0]
                   << " <-u2|-u4> <input.bin> [--chunks 0,0.125,0.25,0.5,1,2,8,256]"
+                  << " [--mode p|r]"
                   << " [--threshold 4000] [--threads 16,32,32,32,32,32,16,16]"
                   << " [--csv out.csv]"
                   << "\n";
@@ -384,12 +382,23 @@ int main(int argc, char** argv) {
     std::string csv_path;
     std::string threads_arg;
     bool has_threads = false;
+    std::uint32_t mode = mans::Mode::P;
     uint32_t threshold = 4000;
 
     for (int i = 3; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--chunks" && i + 1 < argc) {
             chunks_arg = argv[++i];
+        } else if (arg == "--mode" && i + 1 < argc) {
+            std::string mode_arg = argv[++i];
+            if (mode_arg == "p" || mode_arg == "P") {
+                mode = mans::Mode::P;
+            } else if (mode_arg == "r" || mode_arg == "R") {
+                mode = mans::Mode::R;
+            } else {
+                std::cerr << "Unknown mode: " << mode_arg << " (use p or r)\n";
+                return 1;
+            }
         } else if (arg == "--threads" && i + 1 < argc) {
             threads_arg = argv[++i];
             has_threads = true;
@@ -404,6 +413,7 @@ int main(int argc, char** argv) {
     std::cout << "  Input type: " << input_type << "\n";
     std::cout << "  Input file: " << input_path << "\n";
     std::cout << "  Chunks (MB): " << chunks_arg << "\n";
+    std::cout << "  Mode: " << (mode == mans::Mode::R ? "r" : "p") << "\n";
     std::cout << "  Threshold: " << threshold << "\n";
     if (has_threads) {
         std::cout << "  Threads: " << threads_arg << "\n";
@@ -474,7 +484,9 @@ int main(int argc, char** argv) {
         }
 
         mans::MansParams params{};
-        init_params<std::uint16_t>(params);
+        params.backend = mans::Backend::CPU;
+        params.dtype = mans::DataType::U16;
+        params.mode = mode;
         params.adm_threshold = threshold;
         if (has_threads) {
             apply_thread_overrides(params, thread_list);
@@ -504,7 +516,9 @@ int main(int argc, char** argv) {
         }
 
         mans::MansParams params{};
-        init_params<std::uint32_t>(params);
+        params.backend = mans::Backend::CPU;
+        params.dtype = mans::DataType::U32;
+        params.mode = mode;
         params.adm_threshold = threshold;
         if (has_threads) {
             apply_thread_overrides(params, thread_list);

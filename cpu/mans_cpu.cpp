@@ -10,6 +10,7 @@
 
 #include "adm/adm_utils.h"
 #include "pans/pans_utils.h"
+#include "fse/fse_utils.h"
 #include "file_utils.h"
 #include "buffer_cache.h"
 #include "../mans_timing.h"
@@ -51,26 +52,11 @@ static bool decide_use_adm(const T* data, size_t size, uint32_t threshold, uint3
     return (max_block_diff <= threshold);
 }
 
-static void prepend_header(
-    const std::uint8_t* payload,
-    std::size_t payload_size,
-    std::uint8_t* final_payload,
-    std::size_t& final_size,
-    std::uint8_t codec)
-{
-    final_size = 0;
-
-    if (!final_payload) {
-        return;
+static std::uint32_t normalize_mode(std::uint32_t mode) {
+    if (mode == Mode::R) {
+        return Mode::R;
     }
-
-    final_payload[0] = codec;
-
-    if (payload_size > 0) {
-        std::memcpy(final_payload + 1, payload, payload_size);
-    }
-
-    final_size = 1 + payload_size;
+    return Mode::P;
 }
 
 // ==========================================
@@ -107,6 +93,7 @@ void do_compress_t(
 ) {
     uint32_t threshold = params.adm_threshold;
     if (threshold == 0) threshold = 4000;
+    const std::uint32_t mode = normalize_mode(params.mode);
 
     bool use_adm = false;
     {
@@ -120,9 +107,9 @@ void do_compress_t(
         return;
     }
 
-    // PANS input pointer/length (raw bytes or adm-compressed bytes)
-    const std::uint8_t* pans_in_ptr = nullptr;
-    std::size_t pans_in_len = 0;
+    // second-stage input pointer/length (raw bytes or ADM blob)
+    const std::uint8_t* stage2_in_ptr = nullptr;
+    std::size_t stage2_in_len = 0;
 
 
     std::uint8_t* mans_intermediate_buf_local = nullptr;
@@ -158,30 +145,41 @@ void do_compress_t(
                 save_u8_file(dump_path, tmp);
             }
 
-            pans_in_ptr = mans_intermediate_buf_local;
-            pans_in_len = adm_size;
+            stage2_in_ptr = mans_intermediate_buf_local;
+            stage2_in_len = adm_size;
         } else {
             codec_code = 2; // Direct
-            pans_in_ptr = reinterpret_cast<const std::uint8_t*>(data_ptr);
-            pans_in_len = raw_bytes;
+            stage2_in_ptr = reinterpret_cast<const std::uint8_t*>(data_ptr);
+            stage2_in_len = raw_bytes;
         }
 
-        std::size_t pans_out_len = 0;
-        double pans_dur = 0.0;
-
-        {
+        std::size_t stage2_out_len = 0;
+        double stage2_dur = 0.0;
+        if (mode == Mode::P) {
             MANS_TIMING_SCOPE("ans_compress");
             pans_compress(
-                pans_in_ptr,
-                pans_in_len,
-                final_out + 1, //reserve 1 byte for codec
-                pans_out_len,
-                pans_dur
+                stage2_in_ptr,
+                stage2_in_len,
+                final_out + 1, // reserve 1 byte for codec
+                stage2_out_len,
+                stage2_dur
             );
+        } else {
+            MANS_TIMING_SCOPE("fse_compress");
+            fse_compress(
+                stage2_in_ptr,
+                stage2_in_len,
+                final_out + 1, // reserve 1 byte for codec
+                stage2_out_len,
+                stage2_dur
+            );
+        }
+        if (stage2_out_len == 0) {
+            return;
         }
 
         final_out[0] = codec_code;
-        final_out_size=1+pans_out_len;//include codec byte
+        final_out_size = 1 + stage2_out_len; // include codec byte
     }
     catch (const std::bad_alloc&) {
         std::cerr << "[Error] Out of memory during do_compress_t.\n";
@@ -201,73 +199,134 @@ void do_decompress_t(
     bool save_adm,
     const std::string& dump_path
 ) {
+    const std::size_t out_capacity = final_out_size;
     final_out_size = 0;
+    const std::uint32_t mode = normalize_mode(params.mode);
 
     uint8_t codec = 0;
     if (!parse_header(input_ptr, length, codec)) {
         return;
     }
-
+    if (!final_out) {
+        std::cerr << "[Error] final_out is null.\n";
+        return;
+    }
+    if (length <= sizeof(MansHeader)) {
+        std::cerr << "[Error] payload is empty.\n";
+        return;
+    }
 
     const uint8_t* payload_ptr = input_ptr + 1;
     size_t payload_len = length - 1;
 
-    std::uint8_t* mans_intermediate_buf_local = nullptr;
+    std::uint8_t* stage2_dec_buf = nullptr;
 
     try {
-        std::size_t pans_decomp_len = 0;
-        get_compress_and_decompressed_len(payload_ptr,payload_len,pans_decomp_len);
-        {
-            MANS_TIMING_SCOPE("alloc_pans_decomp_buf");
-            mans_intermediate_buf_local =
-                mans::cpu::BufferCache::instance().get_t<std::uint8_t>(
-                    "mans_pans_decomp", pans_decomp_len);
+        std::size_t stage2_decomp_len = 0;
+        if (mode == Mode::P) {
+            std::size_t pans_comp_len = payload_len;
+            get_compress_and_decompressed_len(payload_ptr, pans_comp_len, stage2_decomp_len);
+            if (stage2_decomp_len == 0 || pans_comp_len != payload_len) {
+                std::cerr << "[Error] Invalid PANS payload.\n";
+                return;
+            }
+            {
+                MANS_TIMING_SCOPE("alloc_pans_decomp_buf");
+                stage2_dec_buf =
+                    mans::cpu::BufferCache::instance().get_t<std::uint8_t>(
+                        "mans_pans_decomp", stage2_decomp_len);
+            }
+            if (!stage2_dec_buf) {
+                std::cerr << "[Error] Out of memory.\n";
+                return;
+            }
+            double pans_dur = 0.0;
+            {
+                MANS_TIMING_SCOPE("ans_decompress");
+                pans_decompress(payload_ptr, payload_len, stage2_dec_buf, stage2_decomp_len, pans_dur);
+            }
+            if (stage2_decomp_len == 0) {
+                std::cerr << "[Error] PANS decompress failed.\n";
+                return;
+            }
+        } else {
+            std::size_t frame_len = 0;
+            std::string parse_error;
+            if (!get_fse_compress_and_decompressed_len(payload_ptr, payload_len, frame_len,
+                                                       stage2_decomp_len, &parse_error)) {
+                std::cerr << "[Error] " << parse_error << "\n";
+                return;
+            }
+            if (frame_len != payload_len) {
+                std::cerr << "[Error] Invalid FSE frame length.\n";
+                return;
+            }
+            {
+                MANS_TIMING_SCOPE("alloc_fse_decomp_buf");
+                stage2_dec_buf =
+                    mans::cpu::BufferCache::instance().get_t<std::uint8_t>(
+                        "mans_fse_decomp", stage2_decomp_len);
+            }
+            if (!stage2_dec_buf) {
+                std::cerr << "[Error] Out of memory.\n";
+                return;
+            }
+            double fse_dur = 0.0;
+            {
+                MANS_TIMING_SCOPE("fse_decompress");
+                fse_decompress(payload_ptr, payload_len, stage2_dec_buf, stage2_decomp_len, fse_dur);
+            }
+            if (stage2_decomp_len == 0) {
+                std::cerr << "[Error] FSE decompress failed.\n";
+                return;
+            }
         }
-        if (!mans_intermediate_buf_local) {
-            std::cerr << "[Error] Out of memory.\n";
-            final_out_size = 0;
-            return;
-        }
-        double pans_dur = 0.0;
 
-        {
-            MANS_TIMING_SCOPE("ans_decompress");
-            pans_decompress(payload_ptr, payload_len, mans_intermediate_buf_local, pans_decomp_len, pans_dur);
-        }
-
-        
         if (codec == 2) {
             // Direct Mode
-            if (pans_decomp_len > 0) {
-                std::memcpy(final_out, mans_intermediate_buf_local, pans_decomp_len);
+            if (stage2_decomp_len > out_capacity) {
+                std::cerr << "[Error] Output buffer too small for direct payload.\n";
+                return;
             }
-            final_out_size = pans_decomp_len;
+            if (stage2_decomp_len > 0) {
+                std::memcpy(final_out, stage2_dec_buf, stage2_decomp_len);
+            }
+            final_out_size = stage2_decomp_len;
         }
         else if (codec == 1) {
             // ADM Mode
             if (save_adm && !dump_path.empty()) {
-                std::vector<std::uint8_t> tmp(mans_intermediate_buf_local, mans_intermediate_buf_local + pans_decomp_len);
+                std::vector<std::uint8_t> tmp(stage2_dec_buf, stage2_dec_buf + stage2_decomp_len);
                 save_u8_file(dump_path, tmp);
             }
+            if (stage2_decomp_len < sizeof(adm::FileHeader)) {
+                std::cerr << "[Error] ADM payload is too small.\n";
+                return;
+            }
+            const auto* hdr = reinterpret_cast<const adm::FileHeader*>(stage2_dec_buf);
+            if (hdr->num_elements >
+                std::numeric_limits<std::size_t>::max() / sizeof(T)) {
+                std::cerr << "[Error] ADM output size overflow.\n";
+                return;
+            }
+            const std::size_t expected_bytes =
+                static_cast<std::size_t>(hdr->num_elements) * sizeof(T);
+            if (expected_bytes > out_capacity) {
+                std::cerr << "[Error] Output buffer too small for ADM payload.\n";
+                return;
+            }
             T* recovered = reinterpret_cast<T*>(final_out);
-
-  
             std::size_t num_elements = 0;
 
             {
                 MANS_TIMING_SCOPE("adm_decompress");
-                adm_decompress<T>(mans_intermediate_buf_local, pans_decomp_len, recovered,
+                adm_decompress<T>(stage2_dec_buf, stage2_decomp_len, recovered,
                                   num_elements, params);
             }
-
             final_out_size = num_elements * sizeof(T);
         }
         else {
             std::cerr << "[Error] Unknown codec type: " << int(codec) << "\n";
-        }
-        if (!final_out) {
-            std::cerr << "[Error] final_out is null in ADM mode, cannot decompress.\n";
-            return;
         }
     }
     catch (const std::bad_alloc&) {
