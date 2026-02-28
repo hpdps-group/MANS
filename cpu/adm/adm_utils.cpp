@@ -1,5 +1,6 @@
 #include "adm_utils.h"
 #include "adm.h" 
+#include "../../mans_timing.h"
 #include <iostream>
 #include <cstring>
 #include <chrono>
@@ -65,11 +66,15 @@ void adm_compress(
     std::size_t bit_signals_len = 0;
 
     if constexpr (std::is_same_v<T, std::uint16_t>) {
+        MANS_TIMING_START("mans/adm_encode_core");
         adm::compress_uint16(input_data, input_len, output_lengths_ptr, centers_ptr, codes_ptr,
                              bit_signals_ptr, bit_signals_len, params);
+        MANS_TIMING_STOP("mans/adm_encode_core");
     } else if constexpr (std::is_same_v<T, std::uint32_t>) {
+        MANS_TIMING_START("mans/adm_encode_core");
         adm::compress_uint32(input_data, input_len, output_lengths_ptr, centers_ptr, codes_ptr,
                              bit_signals_ptr, bit_signals_len, params);
+        MANS_TIMING_STOP("mans/adm_encode_core");
     } else {
         static_assert(std::is_same_v<T, std::uint16_t> || std::is_same_v<T, std::uint32_t>,
                       "adm_compress only supports uint16_t and uint32_t");
@@ -135,6 +140,7 @@ void adm_decompress(
     // offset += len4; 
 
     if constexpr (std::is_same_v<T, std::uint16_t>) {
+        MANS_TIMING_START("mans/adm_decode_core");
         adm::decompress_uint16(
             output_lengths, 
             len1 / sizeof(int), // gsize
@@ -145,7 +151,9 @@ void adm_decompress(
             recovered,
             params
         );
+        MANS_TIMING_STOP("mans/adm_decode_core");
     } else if constexpr (std::is_same_v<T, std::uint32_t>) {
+        MANS_TIMING_START("mans/adm_decode_core");
         adm::decompress_uint32(
             output_lengths, 
             len1 / sizeof(int), // gsize
@@ -156,6 +164,7 @@ void adm_decompress(
             recovered,
             params
         );
+        MANS_TIMING_STOP("mans/adm_decode_core");
     } else {
         static_assert(std::is_same_v<T, std::uint16_t> || std::is_same_v<T, std::uint32_t>,
                       "adm_decompress only supports uint16_t and uint32_t");

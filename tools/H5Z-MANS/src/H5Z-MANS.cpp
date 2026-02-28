@@ -115,6 +115,67 @@ static bool threads_all_zero(const mans::MansParams& params) {
            params.adm_decode_values_threads == 0;
 }
 
+static bool apply_dims_from_chunk_dims(const std::vector<hsize_t>& chunk_dims,
+                                       mans::MansParams& params,
+                                       std::string& error) {
+    if (chunk_dims.empty()) {
+        error = "chunk_dims is empty";
+        return false;
+    }
+
+    const auto u32_max = static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max());
+    auto to_u32 = [&](std::uint64_t v, const char* name, std::uint32_t& out) -> bool {
+        if (v == 0 || v > u32_max) {
+            error = std::string("invalid ") + name + " in chunk dims";
+            return false;
+        }
+        out = static_cast<std::uint32_t>(v);
+        return true;
+    };
+
+    params.dims = 1;
+    params.nx = 0;
+    params.ny = 0;
+    params.nz = 0;
+
+    if (chunk_dims.size() == 1) {
+        return to_u32(static_cast<std::uint64_t>(chunk_dims[0]), "nx", params.nx);
+    }
+
+    if (chunk_dims.size() == 2) {
+        params.dims = 2;
+        if (!to_u32(static_cast<std::uint64_t>(chunk_dims[0]), "nx", params.nx)) {
+            return false;
+        }
+        if (!to_u32(static_cast<std::uint64_t>(chunk_dims[1]), "ny", params.ny)) {
+            return false;
+        }
+        return true;
+    }
+
+    params.dims = 3;
+    if (!to_u32(static_cast<std::uint64_t>(chunk_dims[0]), "nx", params.nx)) {
+        return false;
+    }
+    if (!to_u32(static_cast<std::uint64_t>(chunk_dims[1]), "ny", params.ny)) {
+        return false;
+    }
+
+    std::uint64_t merged_z = 1;
+    for (std::size_t i = 2; i < chunk_dims.size(); ++i) {
+        const auto d = static_cast<std::uint64_t>(chunk_dims[i]);
+        if (d == 0 || merged_z > (u32_max / d)) {
+            error = "invalid nz in chunk dims";
+            return false;
+        }
+        merged_z *= d;
+    }
+    if (!to_u32(merged_z, "nz", params.nz)) {
+        return false;
+    }
+    return true;
+}
+
 // =========================================================
 // set_local: auto-apply thread config based on chunk size
 // =========================================================
@@ -165,6 +226,15 @@ static herr_t H5Z_set_local_mans(hid_t dcpl_id, hid_t type_id, hid_t space_id) {
             return 0;
         }
         chunk_elements *= static_cast<std::size_t>(chunk_dims[static_cast<std::size_t>(i)]);
+    }
+
+    {
+        std::string dims_error;
+        if (!apply_dims_from_chunk_dims(chunk_dims, params, dims_error)) {
+            std::cerr << "[H5Z-MANS Warning] Failed to apply dims from HDF5 chunk: "
+                      << dims_error << "\n";
+            return 0;
+        }
     }
 
     const char* csv_env = std::getenv("MANS_THREAD_CSV");
