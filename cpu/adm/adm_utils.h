@@ -12,6 +12,10 @@ template<typename T>
 void adm_compress(
     const T* input_data,
     std::size_t input_len,
+    int dims,
+    int nx,
+    int ny,
+    int nz,
     std::uint8_t* output,
     std::size_t& output_size,
     const mans::MansParams& params
@@ -30,6 +34,10 @@ template<typename T>
 void adm_compress_and_benchmark(
     const T* input_data,
     std::size_t input_len,
+    int dims,
+    int nx,
+    int ny,
+    int nz,
     std::uint8_t* output,
     std::size_t& output_size,
     const mans::MansParams& params

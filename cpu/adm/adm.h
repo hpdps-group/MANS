@@ -31,6 +31,9 @@ namespace adm {
 // ---------------- global parameters ----------------
 inline constexpr int cmp_tblock_size = 32;
 inline constexpr int cmp_chunk = 16;
+inline constexpr int cmp_block_x = 16;
+inline constexpr int cmp_block_y = 16;
+inline constexpr int cmp_block_z = 16;
 inline constexpr int decmp_chunk = 32;
 inline constexpr int max_bytes_signal_per_ele_16b = 2;
 inline constexpr int max_bytes_signal_per_ele_32b = 3;
@@ -49,8 +52,12 @@ struct FileHeader {
 };
 
 inline void compress_uint16(
-    const uint16_t* input_data,   
+    const uint16_t* input_data,
     size_t input_len,
+    int dims,                 // 1/2/3
+    int nx,
+    int ny,                   // if dims<2, ny=0
+    int nz,                   // if dims<3, nz=0
     int* output_lengths,
     uint16_t* centers,
     uint8_t* codes,
@@ -58,15 +65,62 @@ inline void compress_uint16(
     size_t& bit_signals_len,
     const mans::MansParams& params
 ) {
-    int num_elements = (int)input_len;
-    int gsize = (num_elements + cmp_tblock_size * cmp_chunk - 1) / (cmp_tblock_size * cmp_chunk);
-    int total_threads = gsize * cmp_tblock_size;
+    if (!input_data || !output_lengths || !centers || !codes || !bit_signals) return;
+    if (dims < 1 || dims > 3) return;
+    if (nx <= 0) return;
+    if (dims >= 2 && ny <= 0) return;
+    if (dims == 3 && nz <= 0) return;
+
+    constexpr int warp_threads = cmp_tblock_size; // usually 32
+    constexpr int chunk_1d = cmp_chunk;           // 1D: each lane handles 16 (original)
+
+    // 2D/3D tile size (you said 16 if dimension exists)
+    constexpr int blk_x = 16;
+    constexpr int blk_y = 16;
+    constexpr int blk_z = 16;
+
+    const int ny_eff = (dims >= 2) ? ny : 1;
+    const int nz_eff = (dims == 3) ? nz : 1;
+
+    const size_t num_elements = (size_t)nx * (size_t)ny_eff * (size_t)nz_eff;
+    const size_t safe_elements = std::min(input_len, num_elements);
+
+    auto idx3 = [&](int x, int y, int z) -> size_t {
+        return (size_t)x + (size_t)y * (size_t)nx + (size_t)z * (size_t)nx * (size_t)ny_eff;
+    };
+
+    // ---- block grid / gsize ----
+    int gsize = 0;
+    int grid_x = 0, grid_y = 1, grid_z = 1;
+    int block_elems_max = 0;
+
+    if (dims == 1) {
+        // keep original: 32*16
+        block_elems_max = warp_threads * chunk_1d; // 512
+        gsize = (int)((safe_elements + block_elems_max - 1) / block_elems_max);
+        grid_x = gsize; grid_y = 1; grid_z = 1; // logical
+    } else if (dims == 2) {
+        grid_x = (nx + blk_x - 1) / blk_x;
+        grid_y = (ny_eff + blk_y - 1) / blk_y;
+        grid_z = 1;
+        gsize = grid_x * grid_y;
+        block_elems_max = blk_x * blk_y; // 256
+    } else { // dims == 3
+        grid_x = (nx + blk_x - 1) / blk_x;
+        grid_y = (ny_eff + blk_y - 1) / blk_y;
+        grid_z = (nz_eff + blk_z - 1) / blk_z;
+        gsize = grid_x * grid_y * grid_z;
+        block_elems_max = blk_x * blk_y * blk_z; // 4096
+    }
+    const int total_threads = gsize * warp_threads;
+
     int* signal_length = nullptr;
     int* bit_offsets = nullptr;
     uint8_t* tmp_bit_signals = nullptr;
 
-    const int bytes_per_thread = cmp_chunk * max_bytes_signal_per_ele_16b;
-    const size_t tmp_bytes = static_cast<size_t>(total_threads) * bytes_per_thread;    
+    const int elems_per_thread_max = (block_elems + warp_threads - 1) / warp_threads;
+    const int bytes_per_thread = elems_per_thread_max * max_bytes_signal_per_ele_16b;
+    const size_t tmp_bytes = (size_t)total_threads * (size_t)bytes_per_thread;    
     auto& cache = mans::cpu::BufferCache::instance();
     signal_length = cache.get_t<int>("adm_u16_signal_length", static_cast<std::size_t>(gsize));
     bit_offsets = cache.get_t<int>("adm_u16_bit_offsets", static_cast<std::size_t>(total_threads));
@@ -76,23 +130,62 @@ inline void compress_uint16(
         return;
     }
 
+    auto block_to_coords = [&](int b, int& bx, int& by, int& bz) {
+        if (dims == 1) { bx = b; by = 0; bz = 0; return; }
+        if (dims == 2) {
+            bx = b % grid_x;
+            by = b / grid_x;
+            bz = 0;
+            return;
+        }
+        // dims == 3
+        bx = b % grid_x;
+        int t = b / grid_x;
+        by = t % grid_y;
+        bz = t / grid_y;
+    };
 
+    // =========================================================
+    // center_calc: 1D uses contiguous segment; 2D/3D uses tile neighborhood
+    // =========================================================
     {
         MANS_TIMING_SCOPE("adm/compress/center_calc");
-    // Center calculation: parallelizing and reducing unnecessary work
-    #pragma omp parallel for num_threads(params.adm_center_calc_threads)
-    for (int warp = 0; warp < gsize; ++warp) {
-        int base_idx = warp * cmp_tblock_size * cmp_chunk;
-        int end_idx = std::min(base_idx + cmp_tblock_size * cmp_chunk, num_elements);
+        #pragma omp parallel for num_threads(params.adm_center_calc_threads)
+        for (int b = 0; b < gsize; ++b) {
+            uint64_t sum = 0;
+            uint64_t cnt = 0;
 
-        uint64_t sum = 0;
-        for (int i = base_idx; i < end_idx; ++i) {
-            sum += input_data[i];
+            if (dims == 1) {
+                const int base = b * (warp_threads * chunk_1d);
+                const int end  = std::min(base + warp_threads * chunk_1d, (int)safe_elements);
+                for (int i = base; i < end; ++i) { sum += input_data[i]; }
+                cnt = (uint64_t)(end - base);
+            } else {
+                int bx_i, by_i, bz_i;
+                block_to_coords(b, bx_i, by_i, bz_i);
+
+                const int x0 = bx_i * blk_x;
+                const int x1 = std::min(x0 + blk_x, nx);
+                const int y0 = by_i * blk_y;
+                const int y1 = std::min(y0 + blk_y, ny_eff);
+                const int z0 = bz_i * blk_z;
+                const int z1 = std::min(z0 + blk_z, nz_eff);
+
+                for (int z = z0; z < z1; ++z) {
+                    for (int y = y0; y < y1; ++y) {
+                        const size_t base = idx3(x0, y, z);
+                        if (base >= safe_elements) continue;
+                        const int len = x1 - x0;
+                        const int safe_len = (int)std::min((size_t)len, safe_elements - base);
+                        const uint16_t* p = input_data + base;
+                        for (int i = 0; i < safe_len; ++i) sum += p[i];
+                        cnt += (uint64_t)safe_len;
+                    }
+                }
+            }
+
+            centers[b] = (cnt > 0) ? (uint16_t)(sum / cnt) : 0;
         }
-
-        int count = end_idx - base_idx;
-        centers[warp] = (count > 0) ? sum / count : 0;
-    }
     }
 
     {
@@ -102,7 +195,7 @@ inline void compress_uint16(
     for (int thread_idx = 0; thread_idx < total_threads; ++thread_idx) {
         int warp = thread_idx / cmp_tblock_size;
         int lane = thread_idx % cmp_tblock_size;
-        int base_idx = warp * cmp_tblock_size * cmp_chunk + lane * cmp_chunk;
+        int base_idx = warp * block_elems + lane * elems_per_thread_max;
 
         uint8_t* bit_out = &tmp_bit_signals[thread_idx * bytes_per_thread];
         std::memset(bit_out, 0, bytes_per_thread);
@@ -115,7 +208,7 @@ inline void compress_uint16(
 
         int bit_offset = 0;
 
-        for (int i = 0; i < cmp_chunk && base_idx + i < num_elements; ++i) {
+        for (int i = 0; i < elems_per_thread_max && base_idx + i < num_elements; ++i) {
             uint16_t val = input_data[base_idx + i];
             int diff = val > center ? val - center : center - val;
             int output_len = (val == center) ? 1 : (diff + 125) / 126;
@@ -133,12 +226,101 @@ inline void compress_uint16(
     }
 
     {
+        MANS_TIMING_SCOPE("adm/compress/encode");
+        #pragma omp parallel for num_threads(params.adm_encode_threads)
+        for (int thread_idx = 0; thread_idx < total_threads; ++thread_idx) {
+            const int b    = thread_idx / warp_threads;
+            const int lane = thread_idx % warp_threads;
+
+            uint8_t* bit_out = &tmp_bit_signals[thread_idx * bytes_per_thread];
+            std::memset(bit_out, 0, bytes_per_thread);
+
+            int center = centers[b];
+            int bit_offset = 0;
+
+            if (dims == 1) {
+                // keep original mapping: lane handles contiguous 16 values
+                const int base = b * (warp_threads * chunk_1d) + lane * chunk_1d;
+                if (base >= (int)safe_elements) { bit_offsets[thread_idx] = 0; continue; }
+
+                const int end = std::min(base + chunk_1d, (int)safe_elements);
+                for (int idx = base; idx < end; ++idx) {
+                    uint16_t val = input_data[idx];
+                    int diff = val > center ? val - center : center - val;
+                    int output_len = (val == center) ? 1 : (diff + 125) / 126;
+                    uint8_t res = (val == center) ? 1 : ((diff + 126 - output_len * 126) * 2 + (val > center ? -1 : 0) + 1);
+
+                    codes[idx] = res;
+
+                    // Set bitstream (mark the corresponding bit)
+                    bit_out[bit_offset / 8] |= (1 << (7 - (bit_offset % 8)));
+                    bit_offset += output_len;
+                }
+
+                bit_offsets[thread_idx] = bit_offset;
+                continue;
+            }
+
+            // dims=2/3: tile -> flatten in-tile order (x fastest, then y, then z)
+            int bx_i, by_i, bz_i;
+            block_to_coords(b, bx_i, by_i, bz_i);
+
+            const int x0 = bx_i * blk_x;
+            const int x1 = std::min(x0 + blk_x, nx);
+            const int y0 = by_i * blk_y;
+            const int y1 = std::min(y0 + blk_y, ny_eff);
+            const int z0 = bz_i * blk_z;
+            const int z1 = std::min(z0 + blk_z, nz_eff);
+
+            const int sx = x1 - x0;
+            const int sy = y1 - y0;
+            const int sz = z1 - z0;
+            const int block_elems = sx * sy * sz;
+            if (block_elems <= 0) { bit_offsets[thread_idx] = 0; continue; }
+
+            // contiguous slice assignment (compatible style with 1D)
+            const int per_lane = (block_elems + warp_threads - 1) / warp_threads; // ceil
+            const int k0 = lane * per_lane;
+            const int k1 = std::min(k0 + per_lane, block_elems);
+            if (k0 >= k1) { bit_offsets[thread_idx] = 0; continue; }
+
+            const int plane = sx * sy;
+            for (int k = k0; k < k1; ++k) {
+                const int lz = (dims == 3) ? (k / plane) : 0;
+                const int rem = (dims == 3) ? (k - lz * plane) : k;
+                const int ly = rem / sx;
+                const int lx = rem - ly * sx;
+
+                const int x = x0 + lx;
+                const int y = y0 + ly;
+                const int z = z0 + lz;
+
+                const size_t idx = idx3(x, y, z);
+                if (idx >= safe_elements) continue;
+
+                uint16_t val = input_data[idx];
+                int diff = val > center ? val - center : center - val;
+                int output_len = (val == center) ? 1 : (diff + 125) / 126;
+                uint8_t res = (val == center) ? 1 : ((diff + 126 - output_len * 126) * 2 + (val > center ? -1 : 0) + 1);
+
+                codes[idx] = res;
+
+                // Set bitstream (mark the corresponding bit)
+                bit_out[bit_offset / 8] |= (1 << (7 - (bit_offset % 8)));
+                bit_offset += output_len;
+            }
+
+            bit_offsets[thread_idx] = bit_offset;
+        }
+    }
+
+    {
         MANS_TIMING_SCOPE("adm/compress/warp_reduce");
     // Warp-level reduction: compute signal_length[warp] deterministically
     #pragma omp parallel for num_threads(params.adm_warp_reduce_threads)
     for (int warp = 0; warp < gsize; ++warp) {
-        int base_thread = warp * cmp_tblock_size;
-        int end_thread = std::min(base_thread + cmp_tblock_size, total_threads);
+        int base_thread = warp * warp_threads;
+        int end_thread = std::min(base_thread + warp_threads, total_threads);
 
         int max_len_bytes = 0;
         for (int t = base_thread; t < end_thread; ++t) {
@@ -156,16 +338,19 @@ inline void compress_uint16(
     // Fill in the tail bits
     #pragma omp parallel for num_threads(params.adm_fill_tail_threads)
     for (int thread_idx = 0; thread_idx < total_threads; ++thread_idx) {
-        int warp = thread_idx / cmp_tblock_size;
+        int warp = thread_idx / warp_threads;
         int bit_offset = bit_offsets[thread_idx];
         int max_len_bytes = signal_length[warp];
+        if (bit_offset >= max_len_bytes * 8) continue;
 
-        if (bit_offset < max_len_bytes * 8) {
-            uint8_t* bit_out = &tmp_bit_signals[thread_idx * bytes_per_thread];
-            int byte_idx = bit_offset / 8;
-            uint8_t mask = (bit_offset % 8 == 0) ? 0xFF : (0xFF >> (bit_offset % 8));
-            bit_out[byte_idx] |= mask;
-        }
+        uint8_t* bit_out = &tmp_bit_signals[thread_idx * bytes_per_thread];
+        int byte_idx = bit_offset / 8;
+        uint8_t mask = (bit_offset % 8 == 0) ? 0xFF : (0xFF >> (bit_offset % 8));
+        bit_out[byte_idx] |= mask;
+
+        // for (int bb = byte_idx + 1; bb < max_len_bytes; ++bb) {
+        //     if (bb < bytes_per_thread) bit_out[bb] = 0xFF;
+        // }  
     }
     }
 
@@ -179,17 +364,17 @@ inline void compress_uint16(
     }
 
     // Write back bit_signals
-    int total_bit_bytes = output_lengths[gsize] * cmp_tblock_size;
+    int total_bit_bytes = output_lengths[gsize] * warp_threads;
     bit_signals_len = static_cast<size_t>(total_bit_bytes);
 
     {
         MANS_TIMING_SCOPE("adm/compress/write_back");
     #pragma omp parallel for num_threads(params.adm_write_back_threads)
     for (int thread_idx = 0; thread_idx < total_threads; ++thread_idx) {
-        int warp = thread_idx / cmp_tblock_size;
-        int lane = thread_idx % cmp_tblock_size;
+        int warp = thread_idx / warp_threads;
+        int lane = thread_idx % warp_threads;
         int bit_len = signal_length[warp];
-        int dst_base = output_lengths[warp] * cmp_tblock_size + lane * bit_len;
+        int dst_base = output_lengths[warp] * warp_threads + lane * bit_len;
 
         if (dst_base + bit_len > total_bit_bytes) continue;
 

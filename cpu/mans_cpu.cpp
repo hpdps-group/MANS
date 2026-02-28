@@ -123,6 +123,10 @@ template<typename T>
 void do_compress_t(
     const T* data_ptr,
     size_t length,
+    int dims,
+    int nx,
+    int ny,
+    int nz,
     const MansParams& params,
     std::uint8_t* final_out,
     std::size_t& final_out_size,
@@ -174,7 +178,7 @@ void do_compress_t(
             std::size_t adm_size = 0;
             {
                 MANS_TIMING_SCOPE("adm_compress");
-                adm_compress<T>(data_ptr, length, mans_intermediate_buf_local, adm_size, params);
+                adm_compress<T>(data_ptr, length, dims, nx, ny, nz, mans_intermediate_buf_local, adm_size, params);
             }
             if (adm_size > adm_cap) {
                 std::cerr << "[Error] adm_buf overflow: adm_size > adm_cap.\n";

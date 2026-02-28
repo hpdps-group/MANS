@@ -28,6 +28,10 @@ template<typename T>
 void adm_compress(
     const T* input_data,                
     std::size_t input_len,             
+    int dims,
+    int nx,
+    int ny,
+    int nz,
     std::uint8_t* output,              
     std::size_t& output_size,
     const mans::MansParams& params
@@ -65,7 +69,7 @@ void adm_compress(
     std::size_t bit_signals_len = 0;
 
     if constexpr (std::is_same_v<T, std::uint16_t>) {
-        adm::compress_uint16(input_data, input_len, output_lengths_ptr, centers_ptr, codes_ptr,
+        adm::compress_uint16(input_data, input_len, dims, nx, ny, nz, output_lengths_ptr, centers_ptr, codes_ptr,
                              bit_signals_ptr, bit_signals_len, params);
     } else if constexpr (std::is_same_v<T, std::uint32_t>) {
         adm::compress_uint32(input_data, input_len, output_lengths_ptr, centers_ptr, codes_ptr,
@@ -165,7 +169,11 @@ void adm_decompress(
 template<typename T>
 void adm_compress_and_benchmark(
     const T* input_data,             
-    std::size_t input_len,           
+    std::size_t input_len, 
+    int dims,          
+    int nx,
+    int ny,
+    int nz,
     std::uint8_t* output,
     std::size_t& output_size,
     const mans::MansParams& params)
@@ -183,7 +191,7 @@ void adm_compress_and_benchmark(
     // warmup
     for (int i = 0; i < 5; ++i) {
         std::size_t tmp_sz = 0;
-        adm_compress<T>(input_data, input_len, tmp_buf.data(), tmp_sz,params);
+        adm_compress<T>(input_data, input_len, dims, nx, ny, nz, tmp_buf.data(), tmp_sz,params);
     }
 
     if constexpr (std::is_same_v<T, std::uint16_t>) {
@@ -202,7 +210,7 @@ void adm_compress_and_benchmark(
         std::size_t current_size = 0;
         
         auto start = std::chrono::high_resolution_clock::now();
-        adm_compress<T>(input_data, input_len, tmp_buf.data(), current_size,params);
+        adm_compress<T>(input_data, input_len, dims, nx, ny, nz, tmp_buf.data(), current_size,params);
         auto end   = std::chrono::high_resolution_clock::now();
         
         std::chrono::duration<double, std::milli> dur = (end - start);
@@ -280,9 +288,9 @@ void adm_decompress_and_benchmark(
 // Must be placed at the end of the .cpp file, otherwise the linker cannot find the symbols
 // ==========================================================
 
-template void adm_compress<uint16_t>(const uint16_t*, std::size_t, std::uint8_t*, std::size_t&,
+template void adm_compress<uint16_t>(const uint16_t*, std::size_t, int, int, int, int, std::uint8_t*, std::size_t&,
                                      const mans::MansParams& params);
-template void adm_compress<uint32_t>(const uint32_t*, std::size_t, std::uint8_t*, std::size_t&,
+template void adm_compress<uint32_t>(const uint32_t*, std::size_t, int, int, int, int, std::uint8_t*, std::size_t&,
                                      const mans::MansParams& params);
 
 
@@ -291,8 +299,8 @@ template void adm_decompress<uint16_t>(const std::uint8_t*, std::size_t, uint16_
 template void adm_decompress<uint32_t>(const std::uint8_t*, std::size_t, uint32_t*, std::size_t&,
                                        const mans::MansParams& params);
 
-template void adm_compress_and_benchmark<uint16_t>(const uint16_t*, std::size_t, std::uint8_t*, std::size_t&,const mans::MansParams& params);
-template void adm_compress_and_benchmark<uint32_t>(const uint32_t*, std::size_t, std::uint8_t*, std::size_t&,const mans::MansParams& params);
+template void adm_compress_and_benchmark<uint16_t>(const uint16_t*, std::size_t, int, int, int, int, std::uint8_t*, std::size_t&,const mans::MansParams& params);
+template void adm_compress_and_benchmark<uint32_t>(const uint32_t*, std::size_t, int, int, int, int, std::uint8_t*, std::size_t&,const mans::MansParams& params);
 
 template void adm_decompress_and_benchmark<uint16_t>(const std::uint8_t*, std::size_t, uint16_t*, std::size_t&,const mans::MansParams& params);
 template void adm_decompress_and_benchmark<uint32_t>(const std::uint8_t*, std::size_t, uint32_t*, std::size_t&,const mans::MansParams& params);
