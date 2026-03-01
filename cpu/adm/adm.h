@@ -75,13 +75,15 @@ inline void compress_uint16(
     if (dims >= 2 && ny <= 0) return;
     if (dims == 3 && nz <= 0) return;
 
+    // printf("dims: %d, nx: %d, ny: %d, nz: %d", dims, nx, ny, nz);
+
     constexpr int warp_threads = cmp_tblock_size; // usually 32
     constexpr int chunk_1d = cmp_chunk;           // 1D: each lane handles 16 (original)
 
     // 2D/3D tile size (you said 16 if dimension exists)
-    constexpr int blk_x = 16;
-    constexpr int blk_y = 16;
-    constexpr int blk_z = 16;
+    constexpr int blk_x = cmp_block_x;
+    constexpr int blk_y = cmp_block_y;
+    constexpr int blk_z = cmp_block_z;
 
     const int ny_eff = (dims >= 2) ? ny : 1;
     const int nz_eff = (dims == 3) ? nz : 1;
@@ -192,42 +194,42 @@ inline void compress_uint16(
         }
     }
 
-    {
-        MANS_TIMING_SCOPE("adm/compress/encode");
-    // Encoding and setting codes, bit_signals (in temporary space)
-    #pragma omp parallel for num_threads(params.adm_encode_threads)
-    for (int thread_idx = 0; thread_idx < total_threads; ++thread_idx) {
-        int warp = thread_idx / cmp_tblock_size;
-        int lane = thread_idx % cmp_tblock_size;
-        int base_idx = warp * block_elems_max + lane * elems_per_thread_max;
+    // {
+    //     MANS_TIMING_SCOPE("adm/compress/encode");
+    // // Encoding and setting codes, bit_signals (in temporary space)
+    // #pragma omp parallel for num_threads(params.adm_encode_threads)
+    // for (int thread_idx = 0; thread_idx < total_threads; ++thread_idx) {
+    //     int warp = thread_idx / cmp_tblock_size;
+    //     int lane = thread_idx % cmp_tblock_size;
+    //     int base_idx = warp * block_elems_max + lane * elems_per_thread_max;
 
-        uint8_t* bit_out = &tmp_bit_signals[thread_idx * bytes_per_thread];
-        std::memset(bit_out, 0, bytes_per_thread);
+    //     uint8_t* bit_out = &tmp_bit_signals[thread_idx * bytes_per_thread];
+    //     std::memset(bit_out, 0, bytes_per_thread);
 
-        if (base_idx >= num_elements) {
-            bit_offsets[thread_idx] = 0;
-            continue;
-        }
-        int center = centers[warp];
+    //     if (base_idx >= num_elements) {
+    //         bit_offsets[thread_idx] = 0;
+    //         continue;
+    //     }
+    //     int center = centers[warp];
 
-        int bit_offset = 0;
+    //     int bit_offset = 0;
 
-        for (int i = 0; i < elems_per_thread_max && base_idx + i < num_elements; ++i) {
-            uint16_t val = input_data[base_idx + i];
-            int diff = val > center ? val - center : center - val;
-            int output_len = (val == center) ? 1 : (diff + 125) / 126;
-            uint8_t res = (val == center) ? 1 : ((diff + 126 - output_len * 126) * 2 + (val > center ? -1 : 0) + 1);
+    //     for (int i = 0; i < elems_per_thread_max && base_idx + i < num_elements; ++i) {
+    //         uint16_t val = input_data[base_idx + i];
+    //         int diff = val > center ? val - center : center - val;
+    //         int output_len = (val == center) ? 1 : (diff + 125) / 126;
+    //         uint8_t res = (val == center) ? 1 : ((diff + 126 - output_len * 126) * 2 + (val > center ? -1 : 0) + 1);
 
-            codes[base_idx + i] = res;
+    //         codes[base_idx + i] = res;
 
-            // Set bitstream (mark the corresponding bit)
-            bit_out[bit_offset / 8] |= (1 << (7 - (bit_offset % 8)));
-            bit_offset += output_len;
-        }
+    //         // Set bitstream (mark the corresponding bit)
+    //         bit_out[bit_offset / 8] |= (1 << (7 - (bit_offset % 8)));
+    //         bit_offset += output_len;
+    //     }
 
-        bit_offsets[thread_idx] = bit_offset;
-    }
-    }
+    //     bit_offsets[thread_idx] = bit_offset;
+    // }
+    // }
 
     {
         MANS_TIMING_SCOPE("adm/compress/encode");
@@ -393,25 +395,86 @@ inline void compress_uint16(
 }
 
 inline void decompress_uint16(
-    const int* output_lengths,           
-    size_t gsize,                        
-    const uint16_t* centers,             
-    const uint8_t* codes,                
-    size_t num_elements,                
-    const uint8_t* bit_signals,          
+    const int* output_lengths,           // size >= gsize+1
+    size_t gsize,                        // must match compress gsize
+    const uint16_t* centers,             // centers[b]
+    const uint8_t* codes,                // codes[idx]
+    size_t num_elements,                 // == nx*ny_eff*nz_eff (or <=, but must match compress safe_elements usage)
+    const uint8_t* bit_signals,          // packed bitstreams
     uint16_t* output_data,
     const mans::MansParams& params
-)
-{
-    int total_threads = gsize * cmp_tblock_size;
+) {
+    if (!output_lengths || !centers || !codes || !bit_signals || !output_data) return;
 
-    // Step 1: Restore signal[]
+    const int dims = params.dims;
+    const int nx = params.nx;
+    const int ny = params.ny;
+    const int nz = params.nz;
+
+    if (dims < 1 || dims > 3) return;
+    if (nx <= 0) return;
+    if (dims >= 2 && ny <= 0) return;
+    if (dims == 3 && nz <= 0) return;
+
+    constexpr int warp_threads = cmp_tblock_size; // usually 32
+    constexpr int chunk_1d = cmp_chunk;           // 16
+
+    constexpr int blk_x = cmp_block_x;
+    constexpr int blk_y = cmp_block_y;
+    constexpr int blk_z = cmp_block_z;
+
+    const int ny_eff = (dims >= 2) ? ny : 1;
+    const int nz_eff = (dims == 3) ? nz : 1;
+
+    const size_t full_elements = (size_t)nx * (size_t)ny_eff * (size_t)nz_eff;
+    const size_t safe_elements = std::min(num_elements, full_elements);
+
+    auto idx3 = [&](int x, int y, int z) -> size_t {
+        return (size_t)x + (size_t)y * (size_t)nx + (size_t)z * (size_t)nx * (size_t)ny_eff;
+    };
+
+    // ---- derive grid like compress ----
+    int grid_x = 0, grid_y = 1, grid_z = 1;
+
+    if (dims == 1) {
+        // logical: blocks are just contiguous segments, gsize = ceil(N / 512)
+        // grid_x not used for coords
+        grid_x = (int)gsize;
+        grid_y = 1;
+        grid_z = 1;
+    } else if (dims == 2) {
+        grid_x = (nx + blk_x - 1) / blk_x;
+        grid_y = (ny_eff + blk_y - 1) / blk_y;
+        grid_z = 1;
+    } else { // dims == 3
+        grid_x = (nx + blk_x - 1) / blk_x;
+        grid_y = (ny_eff + blk_y - 1) / blk_y;
+        grid_z = (nz_eff + blk_z - 1) / blk_z;
+    }
+
+    auto block_to_coords = [&](int b, int& bx, int& by, int& bz) {
+        if (dims == 1) { bx = b; by = 0; bz = 0; return; }
+        if (dims == 2) {
+            bx = b % grid_x;
+            by = b / grid_x;
+            bz = 0;
+            return;
+        }
+        bx = b % grid_x;
+        int t = b / grid_x;
+        by = t % grid_y;
+        bz = t / grid_y;
+    };
+
+    const int total_threads = (int)gsize * warp_threads;
+
+    // =========================================================
+    // Step 1: Restore signals[] (uint8 per element)
+    // =========================================================
     uint8_t* signals = nullptr;
-
     {
         MANS_TIMING_SCOPE("adm_alloc_scratch");
-        signals = mans::cpu::BufferCache::instance().get_t<uint8_t>(
-            "adm_u16_signals", num_elements);
+        signals = mans::cpu::BufferCache::instance().get_t<uint8_t>("adm_u16_signals", safe_elements);
     }
     if (!signals) {
         std::cerr << "Failed to allocate ADM scratch buffer.\n";
@@ -420,72 +483,203 @@ inline void decompress_uint16(
 
     {
         MANS_TIMING_SCOPE("adm/decompress/restore_signals");
-    #pragma omp parallel for num_threads(params.adm_restore_signals_threads)
-    for (int tid = 0; tid < total_threads; ++tid) {
-        int warp = tid / cmp_tblock_size;
-        int lane = tid % cmp_tblock_size;
-        int idx = tid;
+        #pragma omp parallel for num_threads(params.adm_restore_signals_threads)
+        for (int tid = 0; tid < total_threads; ++tid) {
+            const int b    = tid / warp_threads;
+            const int lane = tid % warp_threads;
 
-        if (idx * cmp_chunk >= num_elements) continue;
+            // per-block bitstream byte length (same for all lanes in block)
+            const int length = output_lengths[b + 1] - output_lengths[b];
+            if (length <= 0) continue;
 
-        int length = output_lengths[warp + 1] - output_lengths[warp];
+            const int src_start_idx = output_lengths[b] * warp_threads + lane * length;
 
-        int src_start_idx = output_lengths[warp] * cmp_tblock_size + lane * length;
-        int dst_start_idx = idx * cmp_chunk;
+            // ---- compute the list size for this lane (lane_elems) and a mapper from local j -> global idx ----
+            int lane_elems = 0;
 
-        uint8_t bit_buffer = 0;
-        int signal_idx = -1;
-        int offset_byte = 0;
-        bool bit = 0;
+            // For dims=2/3, we decode tile-local k in [k0,k1).
+            int bx_i = 0, by_i = 0, bz_i = 0;
+            int x0 = 0, x1 = 0, y0 = 0, y1 = 0, z0 = 0, z1 = 0;
+            int sx = 0, sy = 0, sz = 0;
+            int block_elems = 0;
+            int per_lane = 0;
+            int k0 = 0, k1 = 0;
+            int plane = 0;
 
-        uint8_t local_signal[cmp_chunk] = {0};
+            if (dims == 1) {
+                // lane covers contiguous 16 values (tail block may be shorter)
+                const int base = b * (warp_threads * chunk_1d) + lane * chunk_1d;
+                if ((size_t)base >= safe_elements) continue;
+                const int end = std::min(base + chunk_1d, (int)safe_elements);
+                lane_elems = end - base;
 
-        for (; offset_byte < length && signal_idx < cmp_chunk; offset_byte++) {
-            bit_buffer = bit_signals[src_start_idx + offset_byte];
-            for (int i = 7; i >= 0 && signal_idx < cmp_chunk; i--) {
-                bit = (bit_buffer >> i) & 1;
-                if (bit) {
-                    signal_idx++;
-                } else {
-                    local_signal[signal_idx]++;
+                // decode unary-coded signals for lane_elems symbols
+                int signal_idx = -1;
+                uint8_t local_signal[chunk_1d] = {0};
+                uint8_t bit_buffer = 0;
+                bool bit = 0;
+
+                int offset_byte = 0;
+                for (; offset_byte < length && signal_idx < lane_elems; ++offset_byte) {
+                    bit_buffer = bit_signals[src_start_idx + offset_byte];
+                    for (int i = 7; i >= 0 && signal_idx < lane_elems; i--) {
+                        bit = (bit_buffer >> i) & 1;
+                        if (bit) {
+                            signal_idx++;
+                        } else {
+                            local_signal[signal_idx]++;
+                        }
+                    }
+                }
+
+                for (int j = 0; j < lane_elems; ++j) {
+                    signals[(size_t)base + (size_t)j] = local_signal[j];
+                }
+                continue;
+            }
+
+            // dims=2/3:
+            block_to_coords(b, bx_i, by_i, bz_i);
+            x0 = bx_i * blk_x; x1 = std::min(x0 + blk_x, nx);
+            y0 = by_i * blk_y; y1 = std::min(y0 + blk_y, ny_eff);
+            z0 = bz_i * blk_z; z1 = std::min(z0 + blk_z, nz_eff);
+
+            sx = x1 - x0; sy = y1 - y0; sz = z1 - z0;
+            block_elems = sx * sy * sz;
+            if (block_elems <= 0) continue;
+
+            per_lane = (block_elems + warp_threads - 1) / warp_threads; // ceil
+            k0 = lane * per_lane;
+            k1 = std::min(k0 + per_lane, block_elems);
+            if (k0 >= k1) continue;
+
+            lane_elems = k1 - k0;
+            plane = sx * sy;
+
+            // decode unary-coded signals for lane_elems symbols
+            // NOTE: lane_elems for 2D is <= 8, for 3D is <= 128 with 16^3 tile.
+            // Using a small stack buffer is fine; max 128 here.
+            uint8_t local_signal[128] = {0};
+
+            int signal_idx = -1;
+            int offset_byte = 0;
+            uint8_t bit_buffer = 0;
+            bool bit = 0;
+
+            for (; offset_byte < length && signal_idx < lane_elems; ++offset_byte) {
+                bit_buffer = bit_signals[src_start_idx + offset_byte];
+                for (int i = 7; i >= 0 && signal_idx < lane_elems; i--) {
+                    bit = (bit_buffer >> i) & 1;
+                    if (bit) {
+                        signal_idx++;
+                    } else {
+                        local_signal[signal_idx]++;
+                    }
+                }
+            }
+
+            // write back to global signals using the same k->(x,y,z) mapping as compress
+            for (int j = 0; j < lane_elems; ++j) {
+                const int k = k0 + j;
+
+                const int lz = (dims == 3) ? (k / plane) : 0;
+                const int rem = (dims == 3) ? (k - lz * plane) : k;
+                const int ly = rem / sx;
+                const int lx = rem - ly * sx;
+
+                const int x = x0 + lx;
+                const int y = y0 + ly;
+                const int z = z0 + lz;
+
+                const size_t idx = idx3(x, y, z);
+                if (idx < safe_elements) {
+                    signals[idx] = local_signal[j];
                 }
             }
         }
-
-        // Use a local copy to avoid accessing shared memory repeatedly
-        for (int i = 0; i < cmp_chunk && dst_start_idx + i < num_elements; ++i) {
-            signals[dst_start_idx + i] = local_signal[i];
-        }
-    }
     }
 
+    // =========================================================
+    // Step 2: Decode values (use centers[b] scalar)
+    // =========================================================
     {
         MANS_TIMING_SCOPE("adm/decompress/decode_values");
-    #pragma omp parallel for num_threads(params.adm_decode_values_threads)
-    for (int tid = 0; tid < total_threads; ++tid) {
-        int block_id = tid;
-        int lane = block_id % warp_size;
-        int bid = block_id / cmp_tblock_size;
-        int base_idx = block_id * decmp_chunk;
+        #pragma omp parallel for num_threads(params.adm_decode_values_threads)
+        for (int tid = 0; tid < total_threads; ++tid) {
+            const int b    = tid / warp_threads;
+            const int lane = tid % warp_threads;
 
-        if (base_idx >= num_elements) continue;
+            if (dims == 1) {
+                int base_idx = tid * decmp_chunk;
+                const uint16_t center = (lane < 16) ? centers[b * 2] : centers[b * 2 + 1];
 
-        uint16_t center = (lane < 16) ? centers[bid * 2] : centers[bid * 2 + 1];
+                if ((size_t)base_idx >= safe_elements) continue;
+                const int end = std::min(base_idx + decmp_chunk, (int)safe_elements);
 
-        // Use local variables to minimize memory access and reduce branch conditions
-        for (int i = 0; i < decmp_chunk && base_idx + i < num_elements; ++i) {
-            uint8_t code = codes[base_idx + i];
-            uint8_t signal = signals[base_idx + i];
+                for (int idx = base_idx; idx < end; ++idx) {
+                    const uint8_t code = codes[idx];
+                    const uint8_t signal = signals[idx];
 
-            int diff = (code % 2 == 1) ? ((code - 1) / 2) : (code / 2);
-            diff += signal * 126;
+                    int diff = (code % 2 == 1) ? ((code - 1) / 2) : (code / 2);
+                    diff += signal * 126;
 
-            uint16_t val = (code % 2 == 1) ? center - diff : center + diff;
-            output_data[base_idx + i] = val;
+                    const uint16_t val = (code % 2 == 1) ? center - diff : center + diff;
+                    output_data[idx] = val;
+                }
+                continue;
+            }
+
+            // dims=2/3: same tile mapping and same per-lane slice
+            const uint16_t center = centers[b];
+            int bx_i, by_i, bz_i;
+            block_to_coords(b, bx_i, by_i, bz_i);
+
+            const int x0 = bx_i * blk_x;
+            const int x1 = std::min(x0 + blk_x, nx);
+            const int y0 = by_i * blk_y;
+            const int y1 = std::min(y0 + blk_y, ny_eff);
+            const int z0 = bz_i * blk_z;
+            const int z1 = std::min(z0 + blk_z, nz_eff);
+
+            const int sx = x1 - x0;
+            const int sy = y1 - y0;
+            const int sz = z1 - z0;
+            const int block_elems = sx * sy * sz;
+            if (block_elems <= 0) continue;
+
+            const int per_lane = (block_elems + warp_threads - 1) / warp_threads;
+            const int k0 = lane * per_lane;
+            const int k1 = std::min(k0 + per_lane, block_elems);
+            if (k0 >= k1) continue;
+
+            const int plane = sx * sy;
+
+            for (int k = k0; k < k1; ++k) {
+                const int lz = (dims == 3) ? (k / plane) : 0;
+                const int rem = (dims == 3) ? (k - lz * plane) : k;
+                const int ly = rem / sx;
+                const int lx = rem - ly * sx;
+
+                const int x = x0 + lx;
+                const int y = y0 + ly;
+                const int z = z0 + lz;
+
+                const size_t idx = idx3(x, y, z);
+                if (idx >= safe_elements) continue;
+
+                const uint8_t code = codes[idx];
+                const uint8_t signal = signals[idx];
+
+                int diff = (code & 1) ? ((code - 1) >> 1) : (code >> 1);
+                diff += (int)signal * 126;
+
+                const uint16_t val = (code & 1) ? (uint16_t)(center - diff) : (uint16_t)(center + diff);
+                output_data[idx] = val;
+            }
         }
     }
-    }
 }
+
 
 inline void compress_uint32(
     const uint32_t* input_data,          

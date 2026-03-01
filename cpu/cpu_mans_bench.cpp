@@ -297,15 +297,16 @@ int run_bench_for_type(const std::vector<T>& input,
     const double avg_decomp_ms = total_decomp_ms / denom;
     const double avg_comp_bytes = total_comp_bytes / denom;
 
-    const double ratio = 100.0 * avg_comp_bytes / static_cast<double>(total_bytes);
+    // const double ratio = 100.0 * avg_comp_bytes / static_cast<double>(total_bytes);
+    const double ratio = static_cast<double>(total_bytes) / avg_comp_bytes;
     const double comp_mbps =
         (static_cast<double>(total_bytes) / 1e6) / (avg_comp_ms / 1e3);
     const double decomp_mbps =
         (static_cast<double>(total_bytes) / 1e6) / (avg_decomp_ms / 1e3);
 
     std::cout << std::left << std::setw(8) << "whole"
-              << " | " << std::setw(8) << std::fixed << std::setprecision(2)
-              << ratio << "%"
+              << " | " << std::setw(8) << std::fixed << std::setprecision(8)
+              << ratio 
               << " | " << std::setw(13) << std::fixed << std::setprecision(1)
               << comp_mbps
               << " | " << std::setw(13) << std::fixed << std::setprecision(1)

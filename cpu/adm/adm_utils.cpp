@@ -34,15 +34,51 @@ void adm_compress(
     const mans::MansParams& params
     )          
 {
+    int dims = params.dims;
+    int nx = params.nx;
+    int ny = params.ny;
+    int nz = params.nz;
+    if (dims < 1 || dims > 3) return;
+    if (nx <= 0) return;
+    if (dims >= 2 && ny <= 0) return;
+    if (dims == 3 && nz <= 0) return;
+
     std::size_t num_elements = input_len; 
     if (num_elements == 0) {
         output_size = 0;
         return;
     }
 
-    std::uint64_t gsize = (num_elements
-        + adm::cmp_tblock_size * adm::cmp_chunk - 1)
-        / (adm::cmp_tblock_size * adm::cmp_chunk);
+    // std::uint64_t gsize = (num_elements
+    //     + adm::cmp_tblock_size * adm::cmp_chunk - 1)
+    //     / (adm::cmp_tblock_size * adm::cmp_chunk);
+    constexpr int blk_x = adm::cmp_block_x;
+    constexpr int blk_y = adm::cmp_block_y;
+    constexpr int blk_z = adm::cmp_block_z;
+    const int ny_eff = (dims >= 2) ? ny : 1;
+    const int nz_eff = (dims == 3) ? nz : 1;
+
+    std::uint64_t gsize = 0;
+    std::uint64_t grid_x = 0, grid_y = 1, grid_z = 1;
+
+    if (dims == 1) {
+        // keep original: 32*16
+        int block_elems_max = adm::cmp_tblock_size * adm::cmp_chunk; // 512
+        gsize = (int)((num_elements + block_elems_max - 1) / block_elems_max);
+        grid_x = gsize; grid_y = 1; grid_z = 1; // logical
+    } else if (dims == 2) {
+        grid_x = (nx + blk_x - 1) / blk_x;
+        grid_y = (ny_eff + blk_y - 1) / blk_y;
+        grid_z = 1;
+        gsize = grid_x * grid_y;
+        // block_elems_max = blk_x * blk_y; // 256
+    } else { // dims == 3
+        grid_x = (nx + blk_x - 1) / blk_x;
+        grid_y = (ny_eff + blk_y - 1) / blk_y;
+        grid_z = (nz_eff + blk_z - 1) / blk_z;
+        gsize = grid_x * grid_y * grid_z;
+        // block_elems_max = blk_x * blk_y * blk_z; // 4096
+    }
 
     const std::size_t len_header = sizeof(adm::FileHeader);
     const std::size_t len1 = (gsize + 1) * sizeof(int);
@@ -143,7 +179,7 @@ void adm_decompress(
         MANS_TIMING_START("mans/adm_decode_core");
         adm::decompress_uint16(
             output_lengths, 
-            len1 / sizeof(int), // gsize
+            header.gsize, // gsize
             centers, 
             codes, 
             num_elements, 
@@ -156,7 +192,7 @@ void adm_decompress(
         MANS_TIMING_START("mans/adm_decode_core");
         adm::decompress_uint32(
             output_lengths, 
-            len1 / sizeof(int), // gsize
+            header.gsize, // gsize
             centers, 
             codes, 
             num_elements, 
