@@ -160,6 +160,7 @@ mans::MansParams default_params() {
     params.adm_write_back_threads = 32;
     params.adm_restore_signals_threads = 32;
     params.adm_decode_values_threads = 32;
+    params.dims = 1;
     return params;
 }
 

@@ -54,10 +54,10 @@ struct FileHeader {
 inline void compress_uint16(
     const uint16_t* input_data,
     size_t input_len,
-    int dims,                 // 1/2/3
-    int nx,
-    int ny,                   // if dims<2, ny=0
-    int nz,                   // if dims<3, nz=0
+    // int dims,                 // 1/2/3
+    // int nx,
+    // int ny,                   // if dims<2, ny=0
+    // int nz,                   // if dims<3, nz=0
     int* output_lengths,
     uint16_t* centers,
     uint8_t* codes,
@@ -65,6 +65,10 @@ inline void compress_uint16(
     size_t& bit_signals_len,
     const mans::MansParams& params
 ) {
+    int dims = params.dims;
+    int nx = params.nx;
+    int ny = params.ny;
+    int nz = params.nz;
     if (!input_data || !output_lengths || !centers || !codes || !bit_signals) return;
     if (dims < 1 || dims > 3) return;
     if (nx <= 0) return;
@@ -118,7 +122,7 @@ inline void compress_uint16(
     int* bit_offsets = nullptr;
     uint8_t* tmp_bit_signals = nullptr;
 
-    const int elems_per_thread_max = (block_elems + warp_threads - 1) / warp_threads;
+    const int elems_per_thread_max = (block_elems_max + warp_threads - 1) / warp_threads;
     const int bytes_per_thread = elems_per_thread_max * max_bytes_signal_per_ele_16b;
     const size_t tmp_bytes = (size_t)total_threads * (size_t)bytes_per_thread;    
     auto& cache = mans::cpu::BufferCache::instance();
@@ -195,7 +199,7 @@ inline void compress_uint16(
     for (int thread_idx = 0; thread_idx < total_threads; ++thread_idx) {
         int warp = thread_idx / cmp_tblock_size;
         int lane = thread_idx % cmp_tblock_size;
-        int base_idx = warp * block_elems + lane * elems_per_thread_max;
+        int base_idx = warp * block_elems_max + lane * elems_per_thread_max;
 
         uint8_t* bit_out = &tmp_bit_signals[thread_idx * bytes_per_thread];
         std::memset(bit_out, 0, bytes_per_thread);

@@ -105,7 +105,7 @@ git clone https://github.com/ewTomato/MANS.git
 
 ```shell
 cd MANS; mkdir build; cd build;
-cmake -DTARGET_PLATFORM=cpu_nv .. && make -j   # cpu + nvidia
+cmake -DTARGET_PLATFORM=cpu_nv -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ .. && make -j   # cpu + nvidia
 ```
 
 <!-- ## Instructions for Use
