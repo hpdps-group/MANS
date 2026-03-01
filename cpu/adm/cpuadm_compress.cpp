@@ -53,6 +53,7 @@ int main(int argc, char** argv) {
         adm_compress_and_benchmark<std::uint16_t>(
             input_data.data(), 
             input_data.size(), 
+            dims, nx, ny, nz,
             output.data(), 
             compressed_size,
             params

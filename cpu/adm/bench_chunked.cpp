@@ -129,6 +129,7 @@ std::vector<ChunkInfo> build_chunks(std::size_t total_elements, std::size_t chun
 template <typename T>
 RunStats run_once(const std::vector<T>& input,
                   const std::vector<ChunkInfo>& chunks,
+                  int dims, int nx, int ny, int nz,
                   std::vector<std::uint8_t>& compressed_blob,
                   std::vector<T>& recovered,
                   const mans::MansParams& params) {
@@ -143,7 +144,7 @@ RunStats run_once(const std::vector<T>& input,
     for (std::size_t i = 0; i < chunks.size(); ++i) {
         const auto& chunk = chunks[i];
         std::size_t out_size = 0;
-        adm_compress<T>(input.data() + chunk.offset, chunk.len,
+        adm_compress<T>(input.data() + chunk.offset, chunk.len, dims, nx, ny, nz,
                         compressed_blob.data() + offset, out_size,
                         params);
         comp_sizes[i] = out_size;
