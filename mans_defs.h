@@ -26,6 +26,12 @@ struct MansParams {
     // 0: p-mode (ADM -> PANS)
     // 1: r-mode (ADM -> FSE)
     uint32_t mode = 1;
+
+    // --- 3D Mapping ---
+    uint32_t dims=1;
+    uint32_t nx=0;
+    uint32_t ny=0;
+    uint32_t nz=0;
 };
     
 static_assert(sizeof(MansParams) % 4 == 0, "MansParams size must be multiple of 4 bytes");

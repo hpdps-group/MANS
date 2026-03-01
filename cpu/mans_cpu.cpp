@@ -139,8 +139,10 @@ void do_compress_t(
 
     bool use_adm = false;
     {
-        MANS_TIMING_SCOPE("decide_adm");
+        // MANS_TIMING_SCOPE("decide_adm");
+        MANS_TIMING_START("mans/should_use_adm");
         use_adm = decide_use_adm(data_ptr, length, threshold, params.adm_decide_threads);
+        MANS_TIMING_STOP("mans/should_use_adm");
     }
     std::uint8_t codec_code = 0;
 
