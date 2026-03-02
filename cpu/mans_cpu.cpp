@@ -59,6 +59,11 @@ static std::uint32_t normalize_mode(std::uint32_t mode) {
     return Mode::P;
 }
 
+static bool warn_if_no_adm_enabled() {
+    const char* env = std::getenv("MANS_WARN_IF_NO_ADM");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
 // ==========================================
 // 2. Decompress Helper Function
 // ==========================================
@@ -137,8 +142,15 @@ void do_compress_t(
     {
         // MANS_TIMING_SCOPE("decide_adm");
         MANS_TIMING_START("mans/should_use_adm");
-        use_adm = decide_use_adm(data_ptr, length, threshold, params.adm_decide_threads);
+        use_adm = decide_use_adm(data_ptr, length, threshold, params.adm_decide_threads, params);
         MANS_TIMING_STOP("mans/should_use_adm");
+    }
+    if (!use_adm && warn_if_no_adm_enabled()) {
+        std::cerr << "[Warn] ADM skipped. dims=" << params.dims
+                  << " nx=" << params.nx
+                  << " ny=" << params.ny
+                  << " nz=" << params.nz
+                  << " threshold=" << threshold << "\n";
     }
     std::uint8_t codec_code = 0;
 

@@ -246,7 +246,8 @@ static herr_t H5Z_set_local_mans(hid_t dcpl_id, hid_t type_id, hid_t space_id) {
         std::string error;
         if (!load_thread_csv(csv_path, configs, error)) {
             std::cerr << "[H5Z-MANS Warning] " << error << "\n";
-        } else if (!find_nearest_threads(configs, chunk_elements, chosen)) {
+        } else if (!find_nearest_threads(
+                       configs, chunk_elements, static_cast<uint32_t>(params.dims), chosen)) {
             std::cerr << "[H5Z-MANS Warning] No matching thread config found.\n";
         } else {
             params.adm_decide_threads = chosen.adm_decide_threads;
