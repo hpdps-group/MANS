@@ -25,8 +25,18 @@ namespace cpu {
 // ==========================================
 
 template<typename T>
-static bool decide_use_adm(const T* data, size_t size, uint32_t threshold, uint32_t threads) {
-    const std::size_t block_size = 512;
+static bool decide_use_adm(const T* data,
+                           size_t size,
+                           uint32_t threshold,
+                           uint32_t threads,
+                           const MansParams& params) {
+    std::size_t block_size = static_cast<std::size_t>(adm::cmp_tblock_size) * adm::cmp_chunk;
+    if (params.dims == 2) {
+        block_size = static_cast<std::size_t>(adm::cmp_block_x) * adm::cmp_block_y;
+    } else if (params.dims == 3) {
+        block_size = static_cast<std::size_t>(adm::cmp_block_x) * adm::cmp_block_y *
+                     adm::cmp_block_z;
+    }
     std::uint64_t max_block_diff = 0;
     const std::size_t blocks = (size + block_size - 1) / block_size;
     const int num_threads = threads == 0 ? 16 : static_cast<int>(threads);

@@ -83,7 +83,8 @@ void adm_compress(
     const std::size_t len_header = sizeof(adm::FileHeader);
     const std::size_t len1 = (gsize + 1) * sizeof(int);
     const std::size_t len2 = gsize * sizeof(T);
-    const std::size_t len3 = num_elements * sizeof(std::uint8_t);
+    const std::size_t len3 = (gsize + 7) / 8;
+    const std::size_t len4 = num_elements * sizeof(std::uint8_t);
 
     if (!output) {
         std::cerr << "adm_compress error: output buffer is null.\n";
@@ -96,14 +97,17 @@ void adm_compress(
     offset += len1;
     T* centers_ptr = reinterpret_cast<T*>(output + offset);
     offset += len2;
-    std::uint8_t* codes_ptr = output + offset;
+    std::uint8_t* flags_ptr = output + offset;
     offset += len3;
+    std::uint8_t* codes_ptr = output + offset;
+    offset += len4;
     std::uint8_t* bit_signals_ptr = output + offset;
     std::size_t bit_signals_len = 0;
+    // std::memset(flags_ptr, 0xFF, len3);
 
     if constexpr (std::is_same_v<T, std::uint16_t>) {
         MANS_TIMING_START("mans/adm_encode_core");
-        adm::compress_uint16(input_data, input_len, output_lengths_ptr, centers_ptr, codes_ptr,
+        adm::compress_uint16(input_data, input_len, output_lengths_ptr, centers_ptr, flags_ptr, codes_ptr,
                              bit_signals_ptr, bit_signals_len, params);
         MANS_TIMING_STOP("mans/adm_encode_core");
     } else if constexpr (std::is_same_v<T, std::uint32_t>) {
@@ -122,10 +126,10 @@ void adm_compress(
     header.len1 = len1;
     header.len2 = len2;
     header.len3 = len3;
-    header.len4 = bit_signals_len;
+    header.len4 = len4;
 
     std::memcpy(output, &header, len_header);
-    output_size = len_header + len1 + len2 + len3 + bit_signals_len;
+    output_size = len_header + len1 + len2 + len3 + len4 + bit_signals_len;
 }
 
 template<typename T>
@@ -150,8 +154,17 @@ void adm_decompress(
     num_elements = static_cast<std::size_t>(header.num_elements);
     std::size_t len1 = static_cast<std::size_t>(header.len1); // output_lengths (bytes)
     std::size_t len2 = static_cast<std::size_t>(header.len2); // centers (bytes)
-    std::size_t len3 = static_cast<std::size_t>(header.len3); // codes (bytes)
-    std::size_t len4 = static_cast<std::size_t>(header.len4); // bit_signals (bytes)
+    std::size_t len3 = static_cast<std::size_t>(header.len3); // flags (bytes)
+    std::size_t len4 = static_cast<std::size_t>(header.len4); // codes (bytes)
+    const std::size_t expected_len1 = (static_cast<std::size_t>(header.gsize) + 1) * sizeof(int);
+    const std::size_t expected_len2 = static_cast<std::size_t>(header.gsize) * sizeof(T);
+    const std::size_t expected_len3 = (static_cast<std::size_t>(header.gsize) + 7) / 8;
+    const std::size_t expected_len4 = num_elements * sizeof(std::uint8_t);
+
+    if (len1 != expected_len1 || len2 != expected_len2 ||
+        len3 != expected_len3 || len4 != expected_len4) {
+        throw std::runtime_error("Corrupted file: fixed ADM segment lengths mismatch.");
+    }
 
     if (merged_size < offset + len1 + len2 + len3 + len4) {
         throw std::runtime_error("Corrupted file: not enough data.");
@@ -167,11 +180,15 @@ void adm_decompress(
     const T* centers = reinterpret_cast<const T*>(merged + offset);
     offset += len2;
 
-    // Part 3: codes (uint8_t array)
-    const std::uint8_t* codes = merged + offset;
+    // Part 3: flags (uint8_t array)
+    const std::uint8_t* flags = merged + offset;
     offset += len3;
 
-    // Part 4: bit_signals (uint8_t array)
+    // Part 4: codes (uint8_t array)
+    const std::uint8_t* codes = merged + offset;
+    offset += len4;
+
+    // Part 5: bit_signals (uint8_t array)
     const std::uint8_t* bit_signals = merged + offset;
     // offset += len4; 
 
@@ -182,6 +199,7 @@ void adm_decompress(
             header.gsize, // gsize
             centers, 
             codes, 
+            flags,
             num_elements, 
             bit_signals, 
             recovered,
