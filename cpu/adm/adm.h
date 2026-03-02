@@ -424,7 +424,7 @@ inline void compress_uint16(
 
     // flags bitset: MSB-first, same as your bitstream convention
     const int flags_bytes = (gsize + 7) / 8;
-    std::memset(flags, 0, (size_t)flags_bytes);
+    // std::memset(flags, 0, (size_t)flags_bytes);
 
     auto set_flag = [&](int b, bool v) {
         int byte = b >> 3;
@@ -502,7 +502,7 @@ inline void compress_uint16(
     {
         MANS_TIMING_SCOPE("adm/compress/center_calc");
 
-        #pragma omp parallel for num_threads(params.adm_center_calc_threads)
+        #pragma omp parallel for num_threads(params.adm_center_calc_threads) schedule(static, 8)
         for (int b = 0; b < gsize; ++b) {
             uint64_t sum = 0;
             uint64_t cnt = 0;
