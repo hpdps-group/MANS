@@ -60,6 +60,7 @@ inline void compress_uint16(
     // int nz,                   // if dims<3, nz=0
     int* output_lengths,
     uint16_t* centers,
+    uint8_t* flags,              // len = gsize // 8, each bit means whether the block use adm
     uint8_t* codes,
     uint8_t* bit_signals,
     size_t& bit_signals_len,
@@ -193,43 +194,6 @@ inline void compress_uint16(
             centers[b] = (cnt > 0) ? (uint16_t)(sum / cnt) : 0;
         }
     }
-
-    // {
-    //     MANS_TIMING_SCOPE("adm/compress/encode");
-    // // Encoding and setting codes, bit_signals (in temporary space)
-    // #pragma omp parallel for num_threads(params.adm_encode_threads)
-    // for (int thread_idx = 0; thread_idx < total_threads; ++thread_idx) {
-    //     int warp = thread_idx / cmp_tblock_size;
-    //     int lane = thread_idx % cmp_tblock_size;
-    //     int base_idx = warp * block_elems_max + lane * elems_per_thread_max;
-
-    //     uint8_t* bit_out = &tmp_bit_signals[thread_idx * bytes_per_thread];
-    //     std::memset(bit_out, 0, bytes_per_thread);
-
-    //     if (base_idx >= num_elements) {
-    //         bit_offsets[thread_idx] = 0;
-    //         continue;
-    //     }
-    //     int center = centers[warp];
-
-    //     int bit_offset = 0;
-
-    //     for (int i = 0; i < elems_per_thread_max && base_idx + i < num_elements; ++i) {
-    //         uint16_t val = input_data[base_idx + i];
-    //         int diff = val > center ? val - center : center - val;
-    //         int output_len = (val == center) ? 1 : (diff + 125) / 126;
-    //         uint8_t res = (val == center) ? 1 : ((diff + 126 - output_len * 126) * 2 + (val > center ? -1 : 0) + 1);
-
-    //         codes[base_idx + i] = res;
-
-    //         // Set bitstream (mark the corresponding bit)
-    //         bit_out[bit_offset / 8] |= (1 << (7 - (bit_offset % 8)));
-    //         bit_offset += output_len;
-    //     }
-
-    //     bit_offsets[thread_idx] = bit_offset;
-    // }
-    // }
 
     {
         MANS_TIMING_SCOPE("adm/compress/encode");
@@ -399,6 +363,7 @@ inline void decompress_uint16(
     size_t gsize,                        // must match compress gsize
     const uint16_t* centers,             // centers[b]
     const uint8_t* codes,                // codes[idx]
+    uint8_t* flags,             // len = gsize // 8, each bit means whether the block use adm, must match compress flags
     size_t num_elements,                 // == nx*ny_eff*nz_eff (or <=, but must match compress safe_elements usage)
     const uint8_t* bit_signals,          // packed bitstreams
     uint16_t* output_data,
