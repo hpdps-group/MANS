@@ -363,7 +363,7 @@ inline void decompress_uint16(
     size_t gsize,                        // must match compress gsize
     const uint16_t* centers,             // centers[b]
     const uint8_t* codes,                // codes[idx]
-    uint8_t* flags,             // len = gsize // 8, each bit means whether the block use adm, must match compress flags
+    const uint8_t* flags,       // len = gsize // 8, each bit means whether the block use adm, must match compress flags
     size_t num_elements,                 // == nx*ny_eff*nz_eff (or <=, but must match compress safe_elements usage)
     const uint8_t* bit_signals,          // packed bitstreams
     uint16_t* output_data,

@@ -25,8 +25,18 @@ namespace cpu {
 // ==========================================
 
 template<typename T>
-static bool decide_use_adm(const T* data, size_t size, uint32_t threshold, uint32_t threads) {
-    const std::size_t block_size = 512;
+static bool decide_use_adm(const T* data,
+                           size_t size,
+                           uint32_t threshold,
+                           uint32_t threads,
+                           const MansParams& params) {
+    std::size_t block_size = static_cast<std::size_t>(adm::cmp_tblock_size) * adm::cmp_chunk;
+    if (params.dims == 2) {
+        block_size = static_cast<std::size_t>(adm::cmp_block_x) * adm::cmp_block_y;
+    } else if (params.dims == 3) {
+        block_size = static_cast<std::size_t>(adm::cmp_block_x) * adm::cmp_block_y *
+                     adm::cmp_block_z;
+    }
     std::uint64_t max_block_diff = 0;
     const std::size_t blocks = (size + block_size - 1) / block_size;
     const int num_threads = threads == 0 ? 16 : static_cast<int>(threads);
@@ -57,6 +67,11 @@ static std::uint32_t normalize_mode(std::uint32_t mode) {
         return Mode::R;
     }
     return Mode::P;
+}
+
+static bool warn_if_no_adm_enabled() {
+    const char* env = std::getenv("MANS_WARN_IF_NO_ADM");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
 }
 
 // ==========================================
@@ -137,8 +152,15 @@ void do_compress_t(
     {
         // MANS_TIMING_SCOPE("decide_adm");
         MANS_TIMING_START("mans/should_use_adm");
-        use_adm = decide_use_adm(data_ptr, length, threshold, params.adm_decide_threads);
+        use_adm = decide_use_adm(data_ptr, length, threshold, params.adm_decide_threads, params);
         MANS_TIMING_STOP("mans/should_use_adm");
+    }
+    if (!use_adm && warn_if_no_adm_enabled()) {
+        std::cerr << "[Warn] ADM skipped. dims=" << params.dims
+                  << " nx=" << params.nx
+                  << " ny=" << params.ny
+                  << " nz=" << params.nz
+                  << " threshold=" << threshold << "\n";
     }
     std::uint8_t codec_code = 0;
 

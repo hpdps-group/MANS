@@ -125,6 +125,35 @@ bool parse_dims_from_argv(int argc, char** argv, int& i,
     return true;
 }
 
+bool validate_dims_product(const std::vector<std::uint32_t>& dims,
+                           std::size_t input_elements,
+                           std::string& error) {
+    if (dims.empty()) {
+        error = "--dims is required.";
+        return false;
+    }
+
+    std::size_t expected = 1;
+    for (const std::uint32_t d : dims) {
+        if (d == 0) {
+            error = "All --dims values must be positive.";
+            return false;
+        }
+        if (expected > std::numeric_limits<std::size_t>::max() / static_cast<std::size_t>(d)) {
+            error = "Dimension product overflows size_t.";
+            return false;
+        }
+        expected *= static_cast<std::size_t>(d);
+    }
+
+    if (expected != input_elements) {
+        error = "Input element count (" + std::to_string(input_elements) +
+                ") does not match dims product (" + std::to_string(expected) + ").";
+        return false;
+    }
+    return true;
+}
+
 void apply_dims_override(mans::MansParams& params, const std::vector<std::uint32_t>& dims) {
     if (dims.empty()) {
         return;
@@ -238,11 +267,15 @@ int run_bench_for_type(const std::vector<T>& input,
 
     if (auto_threads && !auto_threads->empty()) {
         mans::cpu::CsvThreadConfig chosen{};
-        if (mans::cpu::find_nearest_threads(*auto_threads, total_elements, chosen)) {
+        if (mans::cpu::find_nearest_threads(
+                *auto_threads,
+                total_elements,
+                static_cast<uint32_t>(params.dims),
+                chosen)) {
             apply_auto_thread_config(params, chosen);
         } else {
             std::cerr << "No matching thread config found for input elements: "
-                      << total_elements << "\n";
+                      << total_elements << ", dims: " << params.dims << "\n";
         }
     }
 
@@ -336,7 +369,7 @@ int main(int argc, char** argv) {
                   << " <-u2|-u4> <input.bin>"
                   << " [--mode p|r]"
                   << " [--threshold 4000] [--threads 16,32,32,32,32,32,16,16]"
-                  << " [--dims D d1 [d2] [d3]]"
+                  << " --dims D d1 [d2] [d3]"
                   << " [--csv out.csv]"
                   << "\n";
         return 1;
@@ -384,21 +417,21 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
+    if (dims_override.empty()) {
+        std::cerr << "--dims is required.\n";
+        return 1;
+    }
 
     std::cout << "Command-line arguments:\n";
     std::cout << "  Input type: " << input_type << "\n";
     std::cout << "  Input file: " << input_path << "\n";
     std::cout << "  Mode: " << (mode == mans::Mode::R ? "r" : "p") << "\n";
     std::cout << "  Threshold: " << threshold << "\n";
-    if (!dims_override.empty()) {
-        std::cout << "  Dims: " << dims_override.size();
-        for (const std::uint32_t d : dims_override) {
-            std::cout << " " << d;
-        }
-        std::cout << "\n";
-    } else {
-        std::cout << "  Dims: (MansParams default)\n";
+    std::cout << "  Dims: " << dims_override.size();
+    for (const std::uint32_t d : dims_override) {
+        std::cout << " " << d;
     }
+    std::cout << "\n";
     if (has_threads) {
         std::cout << "  Threads: " << threads_arg << "\n";
     }
@@ -456,6 +489,11 @@ int main(int argc, char** argv) {
             std::cerr << "Failed to load input file: " << input_path << "\n";
             return 1;
         }
+        std::string dims_error;
+        if (!validate_dims_product(dims_override, input.size(), dims_error)) {
+            std::cerr << dims_error << "\n";
+            return 1;
+        }
 
         mans::MansParams params{};
         params.backend = mans::Backend::CPU;
@@ -487,6 +525,11 @@ int main(int argc, char** argv) {
         std::vector<std::uint32_t> input;
         if (!load_u32_file(input_path, input)) {
             std::cerr << "Failed to load input file: " << input_path << "\n";
+            return 1;
+        }
+        std::string dims_error;
+        if (!validate_dims_product(dims_override, input.size(), dims_error)) {
+            std::cerr << dims_error << "\n";
             return 1;
         }
 
