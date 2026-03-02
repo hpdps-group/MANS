@@ -2,22 +2,24 @@
 set -euo pipefail
 
 ###### ***** Editable Constants (NO ARGS) ***** ######
-SLURM_NODES_LIST=(1 20)
-# SLURM_NODES_LIST=(1 4 8 12 16 20)
+# SLURM_NODES_LIST=(1)
+SLURM_NODES_LIST=(1 10 20 25 30 35 40)
 # SLURM_NODES_LIST=(1)
 # SLURM_NODES_LIST=(16)
 NPROC_PER_NODE=64
 CPU_LIMIT=1
 CHUNK_SIZES_MB=(4.0)
-ENABLE_READ_EXCLUDE=1
-MAX_ACTIVE_JOBS=30
+DATASET_DIMS=(758 852 841)
+ENABLE_READ_EXCLUDE=0
+MAX_ACTIVE_JOBS=10
 BEST_THREAD_DIR="/public/share/acnnprvuzd/MANS/slurms/runs_autotune"
 READ_BIN_DIR="/public/share/acnnprvuzd/MANS/build/bin/h5z-mans"
 
-LIST=(fse_ans fse_huffman mans_original mans none)
+LIST=(mans fse_ans fse_huffman mans_original none)
+# LIST=(fse_ans fse_huffman mans_original mans none)
 CACHE_BUST_FILTERS=(mans mans_original)
 
-SOURCE_DATASET_BIN="/public/share/acnnprvuzd/MANS/datasets/haac/vx_1073726487_1048576kB.u2"
+SOURCE_DATASET_BIN="/public/share/acnnprvuzd/MANS/datasets/sfc-gi/2-sfc-1_758x842x841_1048576kB.u2"
 RUNS_DIR_PREFIX="runs_sweep_dataset"
 
 HDF5_PLUGIN_PATH_VALUE="/public/share/acnnprvuzd/MANS/build/bin/plugins"
@@ -99,8 +101,8 @@ wait_for_submit_slot() {
     if (( active < MAX_ACTIVE_JOBS )); then
       return 0
     fi
-    echo "[WAIT] active jobs for ${SUBMIT_USER}: ${active} (limit=${MAX_ACTIVE_JOBS}), waiting 10s..." >&2
-    sleep 10
+    echo "[WAIT] active jobs for ${SUBMIT_USER}: ${active} (limit=${MAX_ACTIVE_JOBS}), waiting 100s..." >&2
+    sleep 100
   done
 }
 
@@ -203,6 +205,7 @@ SOURCE_DATASET_BIN="${SOURCE_DATASET_BIN}"
 READ_BIN_DIR="${READ_BIN_DIR}"
 WRITE_BIN="${write_bin}"
 BIN_PREFIX="${bin_prefix}"
+DATASET_DIMS=(${DATASET_DIMS[*]})
 
 CHUNK_MB="\${SWEEP_CHUNK_MB:?SWEEP_CHUNK_MB is required}"
 SLURM_NODES_COUNT="\${SWEEP_SLURM_NODES:?SWEEP_SLURM_NODES is required}"
@@ -319,12 +322,34 @@ BIN_TEMPLATE="\${DATASET_BIN_DIR}/rank%d.bin"
 TEST_H5_TEMPLATE="\${DATASETS_DIR}/rank%d.h5"
 CACHE_H5_TEMPLATE="\${DATASETS_DIR}/cache_\${CACHE_BUST_PREFIX}_rank%d.h5"
 
+WRITE_DIMS_ARGS=()
+if [[ "\${BIN_PREFIX}" == "mans" ]]; then
+  if (( \${#DATASET_DIMS[@]} == 0 )); then
+    echo "[ERROR] DATASET_DIMS is empty but BIN_PREFIX=mans" >&2
+    exit 1
+  fi
+  WRITE_DIMS_ARGS=(--dims "\${DATASET_DIMS[@]}")
+fi
+
+CACHE_DIMS_ARGS=()
+if [[ "\${CACHE_BUST_PREFIX}" == "mans" ]]; then
+  if (( \${#DATASET_DIMS[@]} == 0 )); then
+    echo "[ERROR] DATASET_DIMS is empty but CACHE_BUST_PREFIX=mans" >&2
+    exit 1
+  fi
+  CACHE_DIMS_ARGS=(--dims "\${DATASET_DIMS[@]}")
+fi
+
 chunk_tag="\${CHUNK_MB//./p}"
 export MANS_TIMING_ITER=1
 export MANS_TIMING_DUMP_PATH="\${RUNS_DIR}/plugin_timing_\${BIN_PREFIX}_r\${RANK}_cpu\${CPU_LIMIT}_c\${chunk_tag}_write.csv"
 
 set +e
-write_output="\$(mpirun -np "\${RANK}" --bind-to core --map-by ppr:\${NTASKS_PER_NODE}:node:pe=\${CPU_LIMIT} "\${WRITE_BIN}" --chunk-size-mb "\${CHUNK_MB}" --bin-template "\${BIN_TEMPLATE}" --h5-template "\${TEST_H5_TEMPLATE}" 2>&1)"
+write_cmd=(mpirun -np "\${RANK}" --bind-to core --map-by ppr:\${NTASKS_PER_NODE}:node:pe=\${CPU_LIMIT} "\${WRITE_BIN}" --chunk-size-mb "\${CHUNK_MB}" --bin-template "\${BIN_TEMPLATE}" --h5-template "\${TEST_H5_TEMPLATE}")
+if (( \${#WRITE_DIMS_ARGS[@]} > 0 )); then
+  write_cmd+=("\${WRITE_DIMS_ARGS[@]}")
+fi
+write_output="\$("\${write_cmd[@]}" 2>&1)"
 mpirun_rc=\$?
 set -e
 printf '%s\n' "\${write_output}"
@@ -359,7 +384,11 @@ echo "\${CHUNK_MB},\${SLURM_NODES_COUNT},\${RANK},\${CPU_LIMIT},compress,\${thr}
 # cache-busting write: run a different filter write, then remove its output
 export MANS_TIMING_DUMP_PATH="\${RUNS_DIR}/plugin_timing_\${BIN_PREFIX}_r\${RANK}_cpu\${CPU_LIMIT}_c\${chunk_tag}_cache.csv"
 set +e
-cache_output="\$(mpirun -np "\${RANK}" --bind-to core --map-by ppr:\${NTASKS_PER_NODE}:node:pe=\${CPU_LIMIT} "\${CACHE_BUST_WRITE_BIN}" --chunk-size-mb "\${CHUNK_MB}" --bin-template "\${BIN_TEMPLATE}" --h5-template "\${CACHE_H5_TEMPLATE}" 2>&1)"
+cache_cmd=(mpirun -np "\${RANK}" --bind-to core --map-by ppr:\${NTASKS_PER_NODE}:node:pe=\${CPU_LIMIT} "\${CACHE_BUST_WRITE_BIN}" --chunk-size-mb "\${CHUNK_MB}" --bin-template "\${BIN_TEMPLATE}" --h5-template "\${CACHE_H5_TEMPLATE}")
+if (( \${#CACHE_DIMS_ARGS[@]} > 0 )); then
+  cache_cmd+=("\${CACHE_DIMS_ARGS[@]}")
+fi
+cache_output="\$("\${cache_cmd[@]}" 2>&1)"
 cache_rc=\$?
 set -e
 printf '%s\n' "\${cache_output}"
@@ -439,7 +468,8 @@ export MANS_TIMING_ITER=1
 export MANS_TIMING_DUMP_PATH="\${RUNS_DIR}/plugin_timing_\${BIN_PREFIX}_r\${RANK}_cpu\${CPU_LIMIT}_c\${chunk_tag}_read.csv"
 
 set +e
-read_output="\$(mpirun -np "\${RANK}" --bind-to core --map-by ppr:\${NTASKS_PER_NODE}:node:pe=\${CPU_LIMIT} "\${READ_BIN}" --h5-template "\${TEST_H5_TEMPLATE}" 2>&1)"
+read_cmd=(mpirun -np "\${RANK}" --bind-to core --map-by ppr:\${NTASKS_PER_NODE}:node:pe=\${CPU_LIMIT} "\${READ_BIN}" --h5-template "\${TEST_H5_TEMPLATE}")
+read_output="\$("\${read_cmd[@]}" 2>&1)"
 mpirun_rc=\$?
 set -e
 printf '%s\n' "\${read_output}"
@@ -579,7 +609,6 @@ SLURM_READ_EOF
   fi
 
 done
-
 echo
 echo "All jobs submitted in strict sequence: prefix outer, then node, then chunk(write->read->cleanup)."
 echo "run dirs:"
