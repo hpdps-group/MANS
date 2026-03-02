@@ -289,7 +289,7 @@ int run_bench_for_type(const std::vector<T>& input,
     std::vector<std::uint8_t> compressed_input(max_comp_bytes);
     std::vector<std::uint8_t> recovered(total_bytes);
 
-    constexpr int kIters = 11;
+    constexpr int kIters = 15;
     double total_comp_ms = 0.0;
     double total_decomp_ms = 0.0;
     double total_comp_bytes = 0.0;
@@ -317,7 +317,7 @@ int run_bench_for_type(const std::vector<T>& input,
         stats.decomp_ms = stats.decomp_entropy_core_ms +
                           stats.decomp_adm_core_ms;
 
-        if (iter == 0) {
+        if (iter < 5) {
             continue;
         }
         total_comp_ms += stats.comp_ms;
@@ -325,7 +325,7 @@ int run_bench_for_type(const std::vector<T>& input,
         total_comp_bytes += static_cast<double>(stats.comp_bytes);
     }
 
-    const double denom = static_cast<double>(kIters - 1);
+    const double denom = static_cast<double>(kIters - 5);
     const double avg_comp_ms = total_comp_ms / denom;
     const double avg_decomp_ms = total_decomp_ms / denom;
     const double avg_comp_bytes = total_comp_bytes / denom;

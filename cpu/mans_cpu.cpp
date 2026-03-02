@@ -59,7 +59,8 @@ static bool decide_use_adm(const T* data,
             max_block_diff = diff;
         }
     }
-    return (max_block_diff <= threshold);
+    // return (max_block_diff <= threshold);
+    return true; // --- IGNORE ---
 }
 
 static std::uint32_t normalize_mode(std::uint32_t mode) {

@@ -103,7 +103,7 @@ void adm_compress(
     offset += len4;
     std::uint8_t* bit_signals_ptr = output + offset;
     std::size_t bit_signals_len = 0;
-    // std::memset(flags_ptr, 0xFF, len3);
+    std::memset(flags_ptr, 0xFF, len3);
 
     if constexpr (std::is_same_v<T, std::uint16_t>) {
         MANS_TIMING_START("mans/adm_encode_core");
