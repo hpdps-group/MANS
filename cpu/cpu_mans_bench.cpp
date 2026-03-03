@@ -256,7 +256,9 @@ int run_bench_for_type(const std::vector<T>& input,
                        mans::MansParams& params,
                        std::ofstream* csv,
                        const std::string& timing_csv_path,
-                       const std::vector<mans::cpu::CsvThreadConfig>* auto_threads) {
+                       const std::vector<mans::cpu::CsvThreadConfig>* auto_threads,
+                       std::uint32_t warmup_iters,
+                       std::uint32_t bench_iters) {
     if (input.empty()) {
         std::cerr << "Input file is empty.\n";
         return 1;
@@ -289,13 +291,14 @@ int run_bench_for_type(const std::vector<T>& input,
     std::vector<std::uint8_t> compressed_input(max_comp_bytes);
     std::vector<std::uint8_t> recovered(total_bytes);
 
-    constexpr int kIters = 15;
+    const std::uint64_t total_runs =
+        static_cast<std::uint64_t>(warmup_iters) + static_cast<std::uint64_t>(bench_iters);
     double total_comp_ms = 0.0;
     double total_decomp_ms = 0.0;
     double total_comp_bytes = 0.0;
 
     MANS_TIMING_RESET();
-    for (int iter = 0; iter < kIters; ++iter) {
+    for (std::uint64_t iter = 0; iter < total_runs; ++iter) {
         RunStats stats{};
         {
             MANS_TIMING_RUN_SCOPE();
@@ -317,7 +320,7 @@ int run_bench_for_type(const std::vector<T>& input,
         stats.decomp_ms = stats.decomp_entropy_core_ms +
                           stats.decomp_adm_core_ms;
 
-        if (iter < 5) {
+        if (iter < warmup_iters) {
             continue;
         }
         total_comp_ms += stats.comp_ms;
@@ -325,7 +328,7 @@ int run_bench_for_type(const std::vector<T>& input,
         total_comp_bytes += static_cast<double>(stats.comp_bytes);
     }
 
-    const double denom = static_cast<double>(kIters - 5);
+    const double denom = static_cast<double>(bench_iters);
     const double avg_comp_ms = total_comp_ms / denom;
     const double avg_decomp_ms = total_decomp_ms / denom;
     const double avg_comp_bytes = total_comp_bytes / denom;
@@ -369,6 +372,7 @@ int main(int argc, char** argv) {
                   << " <-u2|-u4> <input.bin>"
                   << " [--mode p|r]"
                   << " [--threshold 4000] [--threads 16,32,32,32,32,32,16,16]"
+                  << " [--warmup 5] [--runs 10]"
                   << " --dims D d1 [d2] [d3]"
                   << " [--csv out.csv]"
                   << "\n";
@@ -383,6 +387,8 @@ int main(int argc, char** argv) {
     bool has_threads = false;
     std::uint32_t mode = mans::Mode::P;
     uint32_t threshold = 4000;
+    std::uint32_t warmup_iters = 5;
+    std::uint32_t bench_iters = 10;
 
     for (int i = 3; i < argc; ++i) {
         std::string arg = argv[i];
@@ -406,6 +412,18 @@ int main(int argc, char** argv) {
             csv_path = argv[++i];
         } else if (arg == "--threshold" && i + 1 < argc) {
             threshold = static_cast<uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--warmup" && i + 1 < argc) {
+            std::string error;
+            if (!parse_positive_u32(argv[++i], warmup_iters, error)) {
+                std::cerr << "Invalid --warmup value: " << argv[i] << "\n";
+                return 1;
+            }
+        } else if ((arg == "--runs" || arg == "--iters") && i + 1 < argc) {
+            std::string error;
+            if (!parse_positive_u32(argv[++i], bench_iters, error)) {
+                std::cerr << "Invalid --runs/--iters value: " << argv[i] << "\n";
+                return 1;
+            }
         } else if (arg == "--dims") {
             std::string error;
             if (!parse_dims_from_argv(argc, argv, i, dims_override, error)) {
@@ -427,6 +445,8 @@ int main(int argc, char** argv) {
     std::cout << "  Input file: " << input_path << "\n";
     std::cout << "  Mode: " << (mode == mans::Mode::R ? "r" : "p") << "\n";
     std::cout << "  Threshold: " << threshold << "\n";
+    std::cout << "  Warmup iterations: " << warmup_iters << "\n";
+    std::cout << "  Benchmark iterations: " << bench_iters << "\n";
     std::cout << "  Dims: " << dims_override.size();
     for (const std::uint32_t d : dims_override) {
         std::cout << " " << d;
@@ -520,7 +540,9 @@ int main(int argc, char** argv) {
         return run_bench_for_type<std::uint16_t>(input, params, &csv,
                                                  timing_csv_path,
                                                  use_auto_threads ? &auto_thread_configs
-                                                                  : nullptr);
+                                                                  : nullptr,
+                                                 warmup_iters,
+                                                 bench_iters);
     } else {
         std::vector<std::uint32_t> input;
         if (!load_u32_file(input_path, input)) {
@@ -558,6 +580,8 @@ int main(int argc, char** argv) {
         return run_bench_for_type<std::uint32_t>(input, params, &csv,
                                                  timing_csv_path,
                                                  use_auto_threads ? &auto_thread_configs
-                                                                  : nullptr);
+                                                                  : nullptr,
+                                                 warmup_iters,
+                                                 bench_iters);
     }
 }

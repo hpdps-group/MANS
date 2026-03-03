@@ -66,9 +66,16 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    hsize_t dims[1] = {0};
-    CHECK_H5(H5Sget_simple_extent_dims(space, dims, nullptr));
-    size_t elems = (size_t)dims[0];
+    hssize_t npoints = H5Sget_simple_extent_npoints(space);
+    if (npoints <= 0) {
+        std::fprintf(stderr, "rank %d invalid dataspace size in %s:data\n", rank, in);
+        H5Sclose(space);
+        H5Dclose(dset);
+        H5Fclose(file);
+        MPI_Finalize();
+        return 1;
+    }
+    size_t elems = static_cast<size_t>(npoints);
     size_t bytes = elems * sizeof(std::uint16_t);
     std::vector<std::uint16_t> data(elems);
 

@@ -176,6 +176,54 @@ static bool apply_dims_from_chunk_dims(const std::vector<hsize_t>& chunk_dims,
     return true;
 }
 
+static bool expected_chunk_elements_from_params(const mans::MansParams& params, std::size_t& out) {
+    std::uint64_t elements = 0;
+    if (params.dims <= 1) {
+        if (params.nx == 0) return false;
+        elements = static_cast<std::uint64_t>(params.nx);
+    } else if (params.dims == 2) {
+        if (params.nx == 0 || params.ny == 0) return false;
+        const std::uint64_t nx = static_cast<std::uint64_t>(params.nx);
+        const std::uint64_t ny = static_cast<std::uint64_t>(params.ny);
+        if (nx > (std::numeric_limits<std::uint64_t>::max() / ny)) return false;
+        elements = nx * ny;
+    } else {
+        if (params.nx == 0 || params.ny == 0 || params.nz == 0) return false;
+        const std::uint64_t nx = static_cast<std::uint64_t>(params.nx);
+        const std::uint64_t ny = static_cast<std::uint64_t>(params.ny);
+        const std::uint64_t nz = static_cast<std::uint64_t>(params.nz);
+        if (nx > (std::numeric_limits<std::uint64_t>::max() / ny)) return false;
+        const std::uint64_t xy = nx * ny;
+        if (xy > (std::numeric_limits<std::uint64_t>::max() / nz)) return false;
+        elements = xy * nz;
+    }
+    if (elements == 0 || elements > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        return false;
+    }
+    out = static_cast<std::size_t>(elements);
+    return true;
+}
+
+static void apply_effective_dims_for_chunk_elements(std::size_t actual_elements, mans::MansParams& params) {
+    std::size_t expected_elements = 0;
+    if (!expected_chunk_elements_from_params(params, expected_elements)) {
+        return;
+    }
+    if (actual_elements >= expected_elements || actual_elements == 0) {
+        return;
+    }
+    const auto u32_max = static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
+    if (actual_elements > u32_max) {
+        return;
+    }
+    // Tail chunks have fewer elements than the nominal chunk shape.
+    // Use a deterministic 1D layout so compression writes exact per-chunk dims into header.
+    params.dims = 1;
+    params.nx = static_cast<std::uint32_t>(actual_elements);
+    params.ny = 0;
+    params.nz = 0;
+}
+
 // =========================================================
 // set_local: auto-apply thread config based on chunk size
 // =========================================================
@@ -373,6 +421,7 @@ static size_t H5Z_filter_mans(unsigned int flags, size_t cd_nelmts,
                 return 0;
             }
             size_t num_elements = nbytes / elem_size;
+            apply_effective_dims_for_chunk_elements(num_elements, params);
 
             // Allocation: worst-case bound for MANS (covers ADM + PANS path)
             dst_capacity = mans::get_mans_max_compress_bytes(num_elements, params);

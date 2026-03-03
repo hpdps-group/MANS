@@ -122,6 +122,23 @@ static bool parse_header(const uint8_t* data,
         std::cerr << "[Error] Unknown mode in header: " << int(header.mode) << "\n";
         return false;
     }
+    if (header.dims < 1 || header.dims > 3) {
+        std::cerr << "[Error] Invalid dims in header: " << int(header.dims) << "\n";
+        return false;
+    }
+    const std::uint64_t u32_max = static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max());
+    if (header.nx == 0 || header.nx > u32_max) {
+        std::cerr << "[Error] Invalid nx in header: " << header.nx << "\n";
+        return false;
+    }
+    if (header.dims >= 2 && (header.ny == 0 || header.ny > u32_max)) {
+        std::cerr << "[Error] Invalid ny in header: " << header.ny << "\n";
+        return false;
+    }
+    if (header.dims == 3 && (header.nz == 0 || header.nz > u32_max)) {
+        std::cerr << "[Error] Invalid nz in header: " << header.nz << "\n";
+        return false;
+    }
     const std::uint64_t raw_bytes_u64 = read_le64(header.raw_bytes_le);
     if (raw_bytes_u64 > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
         std::cerr << "[Error] raw size overflows size_t.\n";
@@ -145,24 +162,11 @@ void do_compress_t(
     bool save_adm,
     const std::string& dump_path
 ) {
-    uint32_t threshold = params.adm_threshold;
-    if (threshold == 0) threshold = 4000;
     const std::uint32_t mode = normalize_mode(params.mode);
 
-    bool use_adm = false;
-    {
-        // MANS_TIMING_SCOPE("decide_adm");
-        MANS_TIMING_START("mans/should_use_adm");
-        use_adm = decide_use_adm(data_ptr, length, threshold, params.adm_decide_threads, params);
-        MANS_TIMING_STOP("mans/should_use_adm");
-    }
-    if (!use_adm && warn_if_no_adm_enabled()) {
-        std::cerr << "[Warn] ADM skipped. dims=" << params.dims
-                  << " nx=" << params.nx
-                  << " ny=" << params.ny
-                  << " nz=" << params.nz
-                  << " threshold=" << threshold << "\n";
-    }
+    const bool use_adm = true;
+    // MANS_TIMING_START("mans/should_use_adm");
+    // MANS_TIMING_STOP("mans/should_use_adm");
     std::uint8_t codec_code = 0;
 
     final_out_size = 0;
@@ -247,7 +251,11 @@ void do_compress_t(
         MansHeader header{};
         header.codec = codec_code;
         header.mode = static_cast<std::uint8_t>(mode);
+        header.dims = static_cast<std::uint8_t>(params.dims);
         write_le64(header.raw_bytes_le, static_cast<std::uint64_t>(raw_bytes));
+        header.nx = static_cast<std::uint64_t>(params.nx);
+        header.ny = static_cast<std::uint64_t>(params.ny);
+        header.nz = static_cast<std::uint64_t>(params.nz);
         std::memcpy(final_out, &header, sizeof(header));
         final_out_size = kMansHeaderBytes + stage2_out_len;
     }
@@ -289,6 +297,12 @@ void do_decompress_t(
         std::cerr << "[Error] Invalid raw size in mans header.\n";
         return;
     }
+
+    MansParams effective_params = params;
+    effective_params.dims = static_cast<std::uint32_t>(header.dims);
+    effective_params.nx = static_cast<std::uint32_t>(header.nx);
+    effective_params.ny = static_cast<std::uint32_t>(header.ny);
+    effective_params.nz = static_cast<std::uint32_t>(header.nz);
 
     const uint8_t* payload_ptr = input_ptr + kMansHeaderBytes;
     size_t payload_len = length - kMansHeaderBytes;
@@ -404,7 +418,7 @@ void do_decompress_t(
             {
                 MANS_TIMING_SCOPE("adm_decompress");
                 adm_decompress<T>(stage2_dec_buf, stage2_decomp_len, recovered,
-                                  num_elements, params);
+                                  num_elements, effective_params);
             }
             final_out_size = num_elements * sizeof(T);
             if (final_out_size != raw_bytes) {

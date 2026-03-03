@@ -54,9 +54,12 @@ namespace Mode {
 struct MansHeader {
     std::uint8_t codec;            // 1 = ADM payload, 2 = RAW payload
     std::uint8_t mode;             // 0 = p-mode, 1 = r-mode
+    std::uint8_t dims;             // 1/2/3, effective dims used for this chunk
     std::uint8_t raw_bytes_le[8];  // little-endian raw byte length
+    std::uint64_t nx;              // effective nx used for this chunk
+    std::uint64_t ny;              // effective ny used for this chunk
+    std::uint64_t nz;              // effective nz used for this chunk
 };
-static_assert(sizeof(MansHeader) == 10, "MansHeader must be 10 bytes");
 
 constexpr std::size_t kMansHeaderBytes = sizeof(MansHeader);
 
