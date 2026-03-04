@@ -1698,7 +1698,7 @@ inline void decompress_uint32(
 
         if (base_idx >= num_elements) continue;
 
-        uint32_t center = (lane < 16) ? centers[bid * 2] : centers[bid * 2 + 1];
+        uint32_t center = centers[bid];
 
         // Use local variables to minimize memory access and reduce branch conditions
         for (int i = 0; i < decmp_chunk && base_idx + i < num_elements; ++i) {
