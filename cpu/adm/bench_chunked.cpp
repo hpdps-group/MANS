@@ -77,25 +77,13 @@ bool parse_threads(const std::string& arg, std::vector<int>& threads, std::strin
 }
 
 void apply_thread_overrides(mans::MansParams& params, const std::vector<int>& threads) {
-    params.adm_decide_threads = threads[0];
-    params.adm_center_calc_threads = threads[1];
-    params.adm_encode_threads = threads[2];
-    params.adm_warp_reduce_threads = threads[3];
-    params.adm_fill_tail_threads = threads[4];
-    params.adm_write_back_threads = threads[5];
-    params.adm_restore_signals_threads = threads[6];
-    params.adm_decode_values_threads = threads[7];
+    params.adm_compress_thread = static_cast<std::uint32_t>(threads[0]);
+    params.adm_decompress_thread = static_cast<std::uint32_t>(threads[1]);
 }
 
 void apply_auto_thread_config(mans::MansParams& params, const mans::cpu::CsvThreadConfig& cfg) {
-    params.adm_decide_threads = cfg.adm_decide_threads;
-    params.adm_center_calc_threads = cfg.compress_threads;
-    params.adm_encode_threads = cfg.compress_threads;
-    params.adm_warp_reduce_threads = cfg.compress_threads;
-    params.adm_fill_tail_threads = cfg.compress_threads;
-    params.adm_write_back_threads = cfg.compress_threads;
-    params.adm_restore_signals_threads = cfg.decompress_threads;
-    params.adm_decode_values_threads = cfg.decompress_threads;
+    params.adm_compress_thread = cfg.compress_thread;
+    params.adm_decompress_thread = cfg.decompress_thread;
 }
 
 std::string format_chunk_label(std::size_t bytes) {
@@ -313,7 +301,7 @@ int main(int argc, char** argv) {
     if (argc < 3) {
         std::cerr << "Usage: " << argv[0]
                   << " <-u2|-u4> <input.bin> [--chunks 0.125,0.25,0.5,1,2,8,256]"
-                  << " [--threads 16,32,32,32,32,32,16,16] [--csv out.csv]"
+                  << " [--threads 32,16] [--csv out.csv]"
                   << "\n";
         return 1;
     }
@@ -372,8 +360,8 @@ int main(int argc, char** argv) {
             std::cerr << error << "\n";
             return 1;
         }
-        if (thread_list.size() != 8) {
-            std::cerr << "--threads expects 8 values: decide,center,encode,warp_reduce,"
+        if (thread_list.size() != 2) {
+            std::cerr << "--threads expects 2 values: compress,decompress"
                       << "fill_tail,write_back,restore_signals,decode_values\n";
             return 1;
         }

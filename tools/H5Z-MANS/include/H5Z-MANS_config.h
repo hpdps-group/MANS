@@ -42,18 +42,9 @@ public:
         register_field("nx",            offsetof(mans::MansParams, nx),            ParamType::UINT32);
         register_field("ny",            offsetof(mans::MansParams, ny),            ParamType::UINT32);
         register_field("nz",            offsetof(mans::MansParams, nz),            ParamType::UINT32);
-        register_field("adm_threshold", offsetof(mans::MansParams, adm_threshold), ParamType::UINT32);
-        register_field("adm_decide_threads", offsetof(mans::MansParams, adm_decide_threads), ParamType::UINT32);
-
-        // Register ADM thread fields
-        register_field("adm_center_calc_threads",     offsetof(mans::MansParams, adm_center_calc_threads),     ParamType::UINT32);
-        register_field("adm_encode_threads",          offsetof(mans::MansParams, adm_encode_threads),          ParamType::UINT32);
-        register_field("adm_warp_reduce_threads",     offsetof(mans::MansParams, adm_warp_reduce_threads),     ParamType::UINT32);
-        register_field("adm_fill_tail_threads",       offsetof(mans::MansParams, adm_fill_tail_threads),       ParamType::UINT32);
-        register_field("adm_write_back_threads",      offsetof(mans::MansParams, adm_write_back_threads),      ParamType::UINT32);
-
-        register_field("adm_restore_signals_threads", offsetof(mans::MansParams, adm_restore_signals_threads), ParamType::UINT32);
-        register_field("adm_decode_values_threads",   offsetof(mans::MansParams, adm_decode_values_threads),   ParamType::UINT32);
+        // Register ADM thread fields.
+        register_field("adm_compress_thread",         offsetof(mans::MansParams, adm_compress_thread),         ParamType::UINT32);
+        register_field("adm_decompress_thread",       offsetof(mans::MansParams, adm_decompress_thread),       ParamType::UINT32);
     }
 
     void load(const std::string& filepath) {

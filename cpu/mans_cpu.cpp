@@ -6,7 +6,6 @@
 #include <new>
 #include <memory>
 #include <cstdlib>
-#include <omp.h>
 
 #include "adm/adm_utils.h"
 #include "pans/pans_utils.h"
@@ -20,59 +19,11 @@
 namespace mans {
 namespace cpu {
 
-// ==========================================
-// 1.  Compress Helper Function
-// ==========================================
-
-template<typename T>
-static bool decide_use_adm(const T* data,
-                           size_t size,
-                           uint32_t threshold,
-                           uint32_t threads,
-                           const MansParams& params) {
-    std::size_t block_size = static_cast<std::size_t>(adm::cmp_tblock_size) * adm::cmp_chunk;
-    if (params.dims == 2) {
-        block_size = static_cast<std::size_t>(adm::cmp_block_x) * adm::cmp_block_y;
-    } else if (params.dims == 3) {
-        block_size = static_cast<std::size_t>(adm::cmp_block_x) * adm::cmp_block_y *
-                     adm::cmp_block_z;
-    }
-    std::uint64_t max_block_diff = 0;
-    const std::size_t blocks = (size + block_size - 1) / block_size;
-    const int num_threads = threads == 0 ? 16 : static_cast<int>(threads);
-
-    #pragma omp parallel for num_threads(num_threads) reduction(max:max_block_diff)
-    for (std::size_t b = 0; b < blocks; ++b) {
-        std::size_t i = b * block_size;
-        std::size_t end = std::min(i + block_size, size);
-        T bmin = std::numeric_limits<T>::max();
-        T bmax = std::numeric_limits<T>::min();
-
-        for (std::size_t j = i; j < end; ++j) {
-            T v = data[j];
-            if (v < bmin) bmin = v;
-            if (v > bmax) bmax = v;
-        }
-
-        std::uint64_t diff = static_cast<std::uint64_t>(bmax) - static_cast<std::uint64_t>(bmin);
-        if (diff > max_block_diff) {
-            max_block_diff = diff;
-        }
-    }
-    // return (max_block_diff <= threshold);
-    return true; // --- IGNORE ---
-}
-
 static std::uint32_t normalize_mode(std::uint32_t mode) {
     if (mode == Mode::R) {
         return Mode::R;
     }
     return Mode::P;
-}
-
-static bool warn_if_no_adm_enabled() {
-    const char* env = std::getenv("MANS_WARN_IF_NO_ADM");
-    return env != nullptr && env[0] != '\0' && env[0] != '0';
 }
 
 // ==========================================
@@ -163,11 +114,7 @@ void do_compress_t(
     const std::string& dump_path
 ) {
     const std::uint32_t mode = normalize_mode(params.mode);
-
-    const bool use_adm = true;
-    // MANS_TIMING_START("mans/should_use_adm");
-    // MANS_TIMING_STOP("mans/should_use_adm");
-    std::uint8_t codec_code = 0;
+    constexpr std::uint8_t codec_code = 1; // ADM
 
     final_out_size = 0;
     if (!final_out) {
@@ -189,9 +136,6 @@ void do_compress_t(
     const std::size_t raw_bytes = length * sizeof(T);
 
     try {
-
-        if (use_adm) {
-            codec_code = 1; // ADM
             adm_cap = adm_max_compressed_size<T>(length);
             mans_intermediate_buf_local =
                 mans::cpu::BufferCache::instance().get_t<std::uint8_t>(
@@ -211,18 +155,14 @@ void do_compress_t(
             }
 
             if (save_adm && !dump_path.empty()) {
-                std::vector<std::uint8_t> tmp(mans_intermediate_buf_local, mans_intermediate_buf_local + adm_size);
+                std::vector<std::uint8_t> tmp(
+                    mans_intermediate_buf_local,
+                    mans_intermediate_buf_local + adm_size);
                 save_u8_file(dump_path, tmp);
             }
 
             stage2_in_ptr = mans_intermediate_buf_local;
             stage2_in_len = adm_size;
-        } else {
-            codec_code = 2; // Direct
-            stage2_in_ptr = reinterpret_cast<const std::uint8_t*>(data_ptr);
-            stage2_in_len = raw_bytes;
-        }
-
         std::size_t stage2_out_len = 0;
         double stage2_dur = 0.0;
         if (mode == Mode::P) {

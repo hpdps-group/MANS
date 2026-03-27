@@ -158,7 +158,7 @@ struct FileHeader {
 //     // =========================================================
 //     {
 //         MANS_TIMING_SCOPE("adm/compress/center_calc");
-//         #pragma omp parallel for num_threads(params.adm_center_calc_threads)
+//         #pragma omp parallel for num_threads(params.adm_compress_thread)
 //         for (int b = 0; b < gsize; ++b) {
 //             uint64_t sum = 0;
 //             uint64_t cnt = 0;
@@ -198,7 +198,7 @@ struct FileHeader {
 
 //     {
 //         MANS_TIMING_SCOPE("adm/compress/encode");
-//         #pragma omp parallel for num_threads(params.adm_encode_threads)
+//         #pragma omp parallel for num_threads(params.adm_compress_thread)
 //         for (int thread_idx = 0; thread_idx < total_threads; ++thread_idx) {
 //             const int b    = thread_idx / warp_threads;
 //             const int lane = thread_idx % warp_threads;
@@ -288,7 +288,7 @@ struct FileHeader {
 //     {
 //         MANS_TIMING_SCOPE("adm/compress/warp_reduce");
 //     // Warp-level reduction: compute signal_length[warp] deterministically
-//     #pragma omp parallel for num_threads(params.adm_warp_reduce_threads)
+//     #pragma omp parallel for num_threads(params.adm_compress_thread)
 //     for (int warp = 0; warp < gsize; ++warp) {
 //         int base_thread = warp * warp_threads;
 //         int end_thread = std::min(base_thread + warp_threads, total_threads);
@@ -307,7 +307,7 @@ struct FileHeader {
 //     {
 //         MANS_TIMING_SCOPE("adm/compress/fill_tail");
 //     // Fill in the tail bits
-//     #pragma omp parallel for num_threads(params.adm_fill_tail_threads)
+//     #pragma omp parallel for num_threads(params.adm_compress_thread)
 //     for (int thread_idx = 0; thread_idx < total_threads; ++thread_idx) {
 //         int warp = thread_idx / warp_threads;
 //         int bit_offset = bit_offsets[thread_idx];
@@ -340,7 +340,7 @@ struct FileHeader {
 
 //     {
 //         MANS_TIMING_SCOPE("adm/compress/write_back");
-//     #pragma omp parallel for num_threads(params.adm_write_back_threads)
+//     #pragma omp parallel for num_threads(params.adm_compress_thread)
 //     for (int thread_idx = 0; thread_idx < total_threads; ++thread_idx) {
 //         int warp = thread_idx / warp_threads;
 //         int lane = thread_idx % warp_threads;
@@ -514,7 +514,7 @@ inline void compress_uint16(
         block_sz.resize(gsize);
         block_elems_cached.resize(gsize);
 
-        #pragma omp parallel for num_threads(params.adm_center_calc_threads) schedule(static)
+        #pragma omp parallel for num_threads(params.adm_compress_thread) schedule(static)
         for (int b = 0; b < gsize; ++b) {
             int bx, by, bz;
             block_to_coords(b, bx, by, bz);
@@ -546,7 +546,7 @@ inline void compress_uint16(
     {
         MANS_TIMING_SCOPE("adm/compress/center_calc");
 
-        #pragma omp parallel for num_threads(params.adm_center_calc_threads) schedule(static, 8)
+        #pragma omp parallel for num_threads(params.adm_compress_thread) schedule(static, 8)
         for (int b = 0; b < gsize; ++b) {
             uint64_t sum = 0;
             uint64_t cnt = 0;
@@ -610,7 +610,7 @@ inline void compress_uint16(
     // =========================================================
     {
         MANS_TIMING_SCOPE("adm/compress/encode");
-        #pragma omp parallel for num_threads(params.adm_encode_threads)
+        #pragma omp parallel for num_threads(params.adm_compress_thread)
         for (int thread_idx = 0; thread_idx < total_threads; ++thread_idx) {
             const int b    = thread_idx / warp_threads;
             const int lane = thread_idx % warp_threads;
@@ -736,7 +736,7 @@ inline void compress_uint16(
     // =========================================================
     {
         MANS_TIMING_SCOPE("adm/compress/warp_reduce");
-        #pragma omp parallel for num_threads(params.adm_warp_reduce_threads)
+        #pragma omp parallel for num_threads(params.adm_compress_thread)
         for (int warp = 0; warp < gsize; ++warp) {
             if (get_flag(warp)) {
                 int base_thread = warp * warp_threads;
@@ -768,7 +768,7 @@ inline void compress_uint16(
     // =========================================================
     {
         MANS_TIMING_SCOPE("adm/compress/fill_tail");
-        #pragma omp parallel for num_threads(params.adm_fill_tail_threads)
+        #pragma omp parallel for num_threads(params.adm_compress_thread)
         for (int thread_idx = 0; thread_idx < total_threads; ++thread_idx) {
             int warp = thread_idx / warp_threads;
             if (!get_flag(warp)) continue; // RAW: no tail-fill
@@ -805,7 +805,7 @@ inline void compress_uint16(
     // =========================================================
     {
         MANS_TIMING_SCOPE("adm/compress/write_back");
-        #pragma omp parallel for num_threads(params.adm_write_back_threads)
+        #pragma omp parallel for num_threads(params.adm_compress_thread)
         for (int thread_idx = 0; thread_idx < total_threads; ++thread_idx) {
             int warp = thread_idx / warp_threads;
             int lane = thread_idx % warp_threads;
@@ -972,7 +972,7 @@ inline void compress_uint16(
 
 //     {
 //         MANS_TIMING_SCOPE("adm/decompress/restore_signals");
-//         #pragma omp parallel for num_threads(params.adm_restore_signals_threads)
+//         #pragma omp parallel for num_threads(params.adm_decompress_thread)
 //         for (int tid = 0; tid < total_threads; ++tid) {
 //             const int b    = tid / warp_threads;
 //             const int lane = tid % warp_threads;
@@ -1093,7 +1093,7 @@ inline void compress_uint16(
 //     // =========================================================
 //     {
 //         MANS_TIMING_SCOPE("adm/decompress/decode_values");
-//         #pragma omp parallel for num_threads(params.adm_decode_values_threads)
+//         #pragma omp parallel for num_threads(params.adm_decompress_thread)
 //         for (int tid = 0; tid < total_threads; ++tid) {
 //             const int b    = tid / warp_threads;
 //             const int lane = tid % warp_threads;
@@ -1265,7 +1265,7 @@ inline void decompress_uint16(
         block_sz.resize(gsize);
         block_elems_cached.resize(gsize);
 
-        #pragma omp parallel for num_threads(params.adm_restore_signals_threads) schedule(static)
+        #pragma omp parallel for num_threads(params.adm_decompress_thread) schedule(static)
         for (int b = 0; b < (int)gsize; ++b) {
             int bx = 0, by = 0, bz = 0;
             block_to_coords(b, bx, by, bz);
@@ -1308,7 +1308,7 @@ inline void decompress_uint16(
 
     {
         MANS_TIMING_SCOPE("adm/decompress/restore_signals");
-        #pragma omp parallel for num_threads(params.adm_restore_signals_threads)
+        #pragma omp parallel for num_threads(params.adm_decompress_thread)
         for (int tid = 0; tid < total_threads; ++tid) {
             const int b    = tid / warp_threads;
             const int lane = tid % warp_threads;
@@ -1471,7 +1471,7 @@ inline void decompress_uint16(
     // =========================================================
     {
         MANS_TIMING_SCOPE("adm/decompress/decode_values");
-        #pragma omp parallel for num_threads(params.adm_decode_values_threads)
+        #pragma omp parallel for num_threads(params.adm_decompress_thread)
         for (int tid = 0; tid < total_threads; ++tid) {
             const int b    = tid / warp_threads;
             const int lane = tid % warp_threads;
@@ -1729,7 +1729,7 @@ inline void compress_uint32(
     // static const uint8_t tail_mask[8] = {0xFF, 0x7F, 0x3F, 0x1F, 0x0F, 0x07, 0x03, 0x01};
 
     // Center calculation: parallelizing and reducing unnecessary work
-    #pragma omp parallel for num_threads(params.adm_center_calc_threads)
+    #pragma omp parallel for num_threads(params.adm_compress_thread)
     for (int warp = 0; warp < gsize; ++warp) {
         int base_idx = warp * cmp_tblock_size * cmp_chunk;
         int end_idx = std::min(base_idx + cmp_tblock_size * cmp_chunk, num_elements);
@@ -1745,7 +1745,7 @@ inline void compress_uint32(
 
     // Allocate temporary buffer for bit_signals
     // Encoding and setting codes, bit_signals (in temporary space)
-    #pragma omp parallel for num_threads(params.adm_encode_threads)
+    #pragma omp parallel for num_threads(params.adm_compress_thread)
     for (int thread_idx = 0; thread_idx < total_threads; ++thread_idx) {
         int warp = thread_idx / cmp_tblock_size;
         int lane = thread_idx % cmp_tblock_size;
@@ -1780,7 +1780,7 @@ inline void compress_uint32(
     }
 
     // Warp-level reduction: compute signal_length[warp] deterministically
-    #pragma omp parallel for num_threads(params.adm_warp_reduce_threads)
+    #pragma omp parallel for num_threads(params.adm_compress_thread)
     for (int warp = 0; warp < gsize; ++warp) {
         int base_thread = warp * cmp_tblock_size;
         int end_thread = std::min(base_thread + cmp_tblock_size, total_threads);
@@ -1796,7 +1796,7 @@ inline void compress_uint32(
     }
 
     // Fill in the tail bits
-    #pragma omp parallel for num_threads(params.adm_fill_tail_threads)
+    #pragma omp parallel for num_threads(params.adm_compress_thread)
     for (int thread_idx = 0; thread_idx < total_threads; ++thread_idx) {
         int warp = thread_idx / cmp_tblock_size;
         int bit_offset = bit_offsets[thread_idx];
@@ -1821,7 +1821,7 @@ inline void compress_uint32(
     int total_bit_bytes = output_lengths[gsize] * cmp_tblock_size;
     bit_signals_len = static_cast<size_t>(total_bit_bytes);
 
-    #pragma omp parallel for num_threads(params.adm_write_back_threads)
+    #pragma omp parallel for num_threads(params.adm_compress_thread)
     for (int thread_idx = 0; thread_idx < total_threads; ++thread_idx) {
         int warp = thread_idx / cmp_tblock_size;
         int lane = thread_idx % cmp_tblock_size;
@@ -1865,7 +1865,7 @@ inline void decompress_uint32(
 
     {
         MANS_TIMING_SCOPE("adm/decompress/restore_signals");
-    #pragma omp parallel for num_threads(params.adm_restore_signals_threads)
+    #pragma omp parallel for num_threads(params.adm_decompress_thread)
     for (int tid = 0; tid < total_threads; ++tid) {
         int warp = tid / cmp_tblock_size;
         int lane = tid % cmp_tblock_size;
@@ -1907,7 +1907,7 @@ inline void decompress_uint32(
     // Step 2: Decode values
     {
         MANS_TIMING_SCOPE("adm/decompress/decode_values");
-    #pragma omp parallel for num_threads(params.adm_decode_values_threads)
+    #pragma omp parallel for num_threads(params.adm_decompress_thread)
     for (int tid = 0; tid < total_threads; ++tid) {
         int block_id = tid;
         int lane = block_id % warp_size;

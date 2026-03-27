@@ -13,6 +13,8 @@
 #include <H5PLextern.h>
 #include <hdf5.h>
 
+#include "H5Z-MANS_filter_ids.h"
+
 #include "mans_api.hpp"
 #include "H5Z-MANS_config.h"
 #include "cpu/mans_cpu.h"
@@ -83,9 +85,6 @@ void register_dump_on_exit() {
 }
 } // namespace
 
-// Define the Filter ID
-#define H5Z_FILTER_MANS_ID 32001
-
 using mans::h5::safe_malloc;
 
 constexpr std::size_t kMansParamsWords = sizeof(mans::MansParams) / sizeof(unsigned int);
@@ -105,14 +104,8 @@ static bool parse_mans_params_from_cd(const unsigned int* cd_values,
 }
 
 static bool threads_all_zero(const mans::MansParams& params) {
-    return params.adm_decide_threads == 0 &&
-           params.adm_center_calc_threads == 0 &&
-           params.adm_encode_threads == 0 &&
-           params.adm_warp_reduce_threads == 0 &&
-           params.adm_fill_tail_threads == 0 &&
-           params.adm_write_back_threads == 0 &&
-           params.adm_restore_signals_threads == 0 &&
-           params.adm_decode_values_threads == 0;
+    return params.adm_compress_thread == 0 &&
+           params.adm_decompress_thread == 0;
 }
 
 static bool apply_dims_from_chunk_dims(const std::vector<hsize_t>& chunk_dims,
@@ -298,20 +291,13 @@ static herr_t H5Z_set_local_mans(hid_t dcpl_id, hid_t type_id, hid_t space_id) {
                        configs, chunk_elements, static_cast<uint32_t>(params.dims), chosen)) {
             std::cerr << "[H5Z-MANS Warning] No matching thread config found.\n";
         } else {
-            params.adm_decide_threads = chosen.adm_decide_threads;
-            params.adm_center_calc_threads = chosen.compress_threads;
-            params.adm_encode_threads = chosen.compress_threads;
-            params.adm_warp_reduce_threads = chosen.compress_threads;
-            params.adm_fill_tail_threads = chosen.compress_threads;
-            params.adm_write_back_threads = chosen.compress_threads;
-            params.adm_restore_signals_threads = chosen.decompress_threads;
-            params.adm_decode_values_threads = chosen.decompress_threads;
+            params.adm_compress_thread = chosen.compress_thread;
+            params.adm_decompress_thread = chosen.decompress_thread;
             std::cerr << "[H5Z-MANS Info] Auto threads applied (chunk_elements="
                       << chunk_elements << ", csv_chunk_elements=" << chosen.chunk_elements
                       << "): "
-                      << chosen.adm_decide_threads << ","
-                      << chosen.compress_threads << ","
-                      << chosen.decompress_threads << "\n";
+                      << chosen.compress_thread << ","
+                      << chosen.decompress_thread << "\n";
         }
     }
 

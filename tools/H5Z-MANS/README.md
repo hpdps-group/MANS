@@ -5,7 +5,7 @@
 ## Features
 
 - Shared-library plugin loadable via `HDF5_PLUGIN_PATH`
-- MANS filter (`id=32001`) and pass-through NONE filter (`id=32002`)
+- MANS filter (`id=32032`)
 - Benchmark/test executables for MANS/ZSTD/SZ3/GZIP/NONE and MPI read/write cases
 - Supports unsigned integer datasets (`u16` / `u32` in MANS path)
 
@@ -49,15 +49,15 @@ export HDF5_PLUGIN_PATH="/workspace/SZ3/build/tools/H5Z-SZ3:/workspace/MANS/buil
 
 ## Filter IDs Used in Test Tools
 
-- `MANS`: `32001`
-- `NONE`: `32002`
+- `MANS`: `32032`
 - `FSE`: `32028`
 - `ZSTD`: `32015`
 - `SZ3`: `32024`
 - `GZIP/DEFLATE`: `1` (built-in HDF5)
 
 Notes:
-- `MANS`/`NONE` are provided by this repo (`libH5Z-MANS.so`, `libH5Z-NONE.so`).
+- `MANS` is provided by this repo (`libH5Z-MANS.so`).
+- `MANS` currently uses the requested target ID `32032` in this repository.
 - `FSE` id `32028` is used by `fse_*` test tools and requires FSE plugin availability in `HDF5_PLUGIN_PATH` (for example `libH5Zfse.so`).
 
 ## Quick Usage
@@ -69,7 +69,7 @@ Notes:
   [--dataset-mb N] \
   [--chunk-mb N] \
   [--filter mans|zstd|sz3|gzip|none] \
-  [--threads v1,v2,v3,v4,v5,v6,v7,v8] \
+  [--threads v1,v2,v3,v4,v5,v6,v7] \
   [--output file.h5]
 ```
 
@@ -84,7 +84,7 @@ Notes:
   [--config gen.cfg] [--synth-config synth.cfg] \
   [--output-dir DIR] [--output-name name.bin] [--output-prefix NAME] \
   [--size-per-rank-mb MB] [--ranks N] [--jobs N] \
-  [--ratio-constant R] [--dtype u16|u32] [--adm-threshold N]
+  [--ratio-constant R] [--dtype u16|u32]
 ```
 
 ### 3) MPI write/read micro-tests

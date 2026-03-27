@@ -150,15 +150,8 @@ mans::MansParams default_params(const mans::data_gen::GeneratedDims& shape) {
     params.backend = mans::Backend::CPU;
     params.dtype = mans::DataType::U16;
     params.mode = mans::Mode::P;
-    params.adm_threshold = kAdmThreshold;
-    params.adm_decide_threads = 0;
-    params.adm_center_calc_threads = 32;
-    params.adm_encode_threads = 32;
-    params.adm_warp_reduce_threads = 32;
-    params.adm_fill_tail_threads = 32;
-    params.adm_write_back_threads = 32;
-    params.adm_restore_signals_threads = 32;
-    params.adm_decode_values_threads = 32;
+    params.adm_compress_thread = 32;
+    params.adm_decompress_thread = 32;
 
     params.dims = shape.dims;
     params.nx = shape.nx;
@@ -267,14 +260,8 @@ void sweep_codec_threads(const std::uint16_t* data,
 
     for (int threads : thread_list) {
         mans::MansParams params = base_params;
-        params.adm_decide_threads = 0;
-        params.adm_center_calc_threads = static_cast<std::uint32_t>(threads);
-        params.adm_encode_threads = static_cast<std::uint32_t>(threads);
-        params.adm_warp_reduce_threads = static_cast<std::uint32_t>(threads);
-        params.adm_fill_tail_threads = static_cast<std::uint32_t>(threads);
-        params.adm_write_back_threads = static_cast<std::uint32_t>(threads);
-        params.adm_restore_signals_threads = static_cast<std::uint32_t>(threads);
-        params.adm_decode_values_threads = static_cast<std::uint32_t>(threads);
+        params.adm_compress_thread = static_cast<std::uint32_t>(threads);
+        params.adm_decompress_thread = static_cast<std::uint32_t>(threads);
 
         {
             std::ostringstream line;
@@ -373,26 +360,25 @@ bool write_best_threads_csv(const std::string& input_csv,
         return false;
     }
 
-    out << "chunk_elements,adm_decide_threads,compress_threads,decompress_threads,dims\n";
+    out << "chunk_elements,compress_thread,decompress_thread,dims\n";
     for (const auto& item : best) {
         const std::size_t chunk_elements = item.first.first;
         const int dims = item.first.second;
         const auto& modes = item.second;
 
-        int decide_threads = 0;
-        int compress_threads = 0;
-        int decompress_threads = 0;
+        int compress_thread = 0;
+        int decompress_thread = 0;
         auto it_comp = modes.find("compress");
         if (it_comp != modes.end()) {
-            compress_threads = it_comp->second.threads;
+            compress_thread = it_comp->second.threads;
         }
         auto it_decomp = modes.find("decompress");
         if (it_decomp != modes.end()) {
-            decompress_threads = it_decomp->second.threads;
+            decompress_thread = it_decomp->second.threads;
         }
 
-        out << chunk_elements << "," << decide_threads << ","
-            << compress_threads << "," << decompress_threads << ","
+        out << chunk_elements << ","
+            << compress_thread << "," << decompress_thread << ","
             << dims << "\n";
     }
 

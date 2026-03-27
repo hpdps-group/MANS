@@ -19,6 +19,7 @@
 
 #include "mans_data_gen.h"
 #include "H5Z-MANS_config.h"
+#include "H5Z-MANS_filter_ids.h"
 #include "cpu/mans_cpu.h"
 #include "mans_timing.h"
 #include "../include/sz3_config_min.h"
@@ -28,10 +29,8 @@
 #endif
 
 // Filter IDs
-#define FILTER_ID_NONE    32002
 #define FILTER_ID_DEFLATE 1
 #define FILTER_ID_ZSTD    32015
-#define FILTER_ID_MANS    32001
 #define FILTER_ID_SZ3     32024
 
 static constexpr double DEFAULT_DATASET_MB = 1024.0; // 1GB
@@ -68,7 +67,7 @@ struct Options {
     double chunk_mb = DEFAULT_CHUNK_MB;
     std::string output_h5 = DEFAULT_OUTPUT_H5;
     FilterKind filter = FilterKind::Mans;
-    std::vector<int> threads = {32, 32, 32, 32, 32, 32, 32, 32};
+    std::vector<int> threads = {32, 32};
     bool threads_from_user = false;
 };
 
@@ -169,8 +168,8 @@ static std::vector<int> parse_threads(const std::string& s) {
         }
         values.push_back(v);
     }
-    if (values.size() != 8) {
-        throw std::runtime_error("--threads requires exactly 8 values");
+    if (values.size() != 2) {
+        throw std::runtime_error("--threads requires exactly 2 values");
     }
     return values;
 }
@@ -179,7 +178,7 @@ static void print_usage(const char* prog) {
     std::cerr
         << "Usage: " << prog
         << " [--dataset-mb N] [--chunk-mb N] [--filter mans|zstd|sz3|gzip|none]\n"
-           "             [--threads v1,v2,v3,v4,v5,v6,v7,v8] [--output file.h5]\n";
+           "             [--threads compress,decompress] [--output file.h5]\n";
 }
 
 static Options parse_args(int argc, char** argv) {
@@ -260,28 +259,15 @@ static mans::MansParams build_mans_params(const Options& opts) {
     mans::MansParams params{};
     params.backend = mans::Backend::CPU;
     params.dtype = mans::DataType::U16;
-    params.adm_threshold = DEFAULT_ADM_THRESHOLD;
 
     if (!opts.threads_from_user) {
-        params.adm_decide_threads = 0;
-        params.adm_center_calc_threads = 0;
-        params.adm_encode_threads = 0;
-        params.adm_warp_reduce_threads = 0;
-        params.adm_fill_tail_threads = 0;
-        params.adm_write_back_threads = 0;
-        params.adm_restore_signals_threads = 0;
-        params.adm_decode_values_threads = 0;
+        params.adm_compress_thread = 0;
+        params.adm_decompress_thread = 0;
         return params;
     }
 
-    params.adm_decide_threads = static_cast<std::uint32_t>(opts.threads[0]);
-    params.adm_center_calc_threads = static_cast<std::uint32_t>(opts.threads[1]);
-    params.adm_encode_threads = static_cast<std::uint32_t>(opts.threads[2]);
-    params.adm_warp_reduce_threads = static_cast<std::uint32_t>(opts.threads[3]);
-    params.adm_fill_tail_threads = static_cast<std::uint32_t>(opts.threads[4]);
-    params.adm_write_back_threads = static_cast<std::uint32_t>(opts.threads[5]);
-    params.adm_restore_signals_threads = static_cast<std::uint32_t>(opts.threads[6]);
-    params.adm_decode_values_threads = static_cast<std::uint32_t>(opts.threads[7]);
+    params.adm_compress_thread = static_cast<std::uint32_t>(opts.threads[0]);
+    params.adm_decompress_thread = static_cast<std::uint32_t>(opts.threads[1]);
     return params;
 }
 
@@ -299,14 +285,8 @@ static bool resolve_auto_threads(const std::string& csv_path,
         return false;
     }
     out_threads = {
-        static_cast<int>(chosen.adm_decide_threads),
-        static_cast<int>(chosen.compress_threads),
-        static_cast<int>(chosen.compress_threads),
-        static_cast<int>(chosen.compress_threads),
-        static_cast<int>(chosen.compress_threads),
-        static_cast<int>(chosen.compress_threads),
-        static_cast<int>(chosen.decompress_threads),
-        static_cast<int>(chosen.decompress_threads)
+        static_cast<int>(chosen.compress_thread),
+        static_cast<int>(chosen.decompress_thread)
     };
     return true;
 }
@@ -319,11 +299,11 @@ static void configure_filter(hid_t dcpl,
     CHECK_H5(H5Pset_chunk(dcpl, 1, chunk));
 
     if (opts.filter == FilterKind::None) {
-        const htri_t avail = H5Zfilter_avail(FILTER_ID_NONE);
+        const htri_t avail = H5Zfilter_avail(H5Z_FILTER_NONE_ID);
         if (!avail) {
             throw std::runtime_error("H5Z-NONE filter not available");
         }
-        CHECK_H5(H5Pset_filter(dcpl, FILTER_ID_NONE, 0, 0, nullptr));
+        CHECK_H5(H5Pset_filter(dcpl, H5Z_FILTER_NONE_ID, 0, 0, nullptr));
         return;
     }
 
@@ -348,7 +328,7 @@ static void configure_filter(hid_t dcpl,
         const std::size_t cd_count = sizeof(mans::MansParams) / sizeof(unsigned int);
         std::vector<unsigned int> cd(cd_count, 0);
         std::memcpy(cd.data(), &mans_params, sizeof(mans::MansParams));
-        CHECK_H5(H5Pset_filter(dcpl, FILTER_ID_MANS, 0, cd.size(), cd.data()));
+        CHECK_H5(H5Pset_filter(dcpl, H5Z_FILTER_MANS_ID, 0, cd.size(), cd.data()));
         return;
     }
 
