@@ -112,7 +112,7 @@ void adm_compress(
         MANS_TIMING_STOP("mans/adm_encode_core");
     } else if constexpr (std::is_same_v<T, std::uint32_t>) {
         MANS_TIMING_START("mans/adm_encode_core");
-        adm::compress_uint32(input_data, input_len, output_lengths_ptr, centers_ptr, codes_ptr,
+        adm::compress_uint32(input_data, input_len, output_lengths_ptr, centers_ptr, flags_ptr, codes_ptr,
                              bit_signals_ptr, bit_signals_len, params);
         MANS_TIMING_STOP("mans/adm_encode_core");
     } else {
@@ -213,6 +213,7 @@ void adm_decompress(
             header.gsize, // gsize
             centers, 
             codes, 
+            flags,
             num_elements, 
             bit_signals, 
             recovered,
