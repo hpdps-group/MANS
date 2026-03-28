@@ -30,6 +30,8 @@ using mans::cpu::load_thread_csv;
 
 namespace {
 std::once_flag g_timing_dump_once;
+std::once_flag g_thread_csv_warn_once;
+std::once_flag g_thread_match_warn_once;
 int g_mpi_rank = -1;
 bool g_mpi_rank_set = false;
 std::atomic<int> g_timing_iter_seen{-1};
@@ -83,11 +85,29 @@ void register_dump_on_exit() {
     });
 #endif
 }
+
+void warn_once_thread_csv_fallback(const std::string& error) {
+    std::call_once(g_thread_csv_warn_once, [&]() {
+        std::cerr << "[H5Z-MANS Warning] " << error
+                  << ". Falling back to default threads 32,32\n";
+    });
+}
+
+void warn_once_thread_match_fallback(std::size_t chunk_elements, std::uint32_t dims) {
+    std::call_once(g_thread_match_warn_once, [&]() {
+        std::cerr << "[H5Z-MANS Warning] No matching thread config found for chunk_elements="
+                  << chunk_elements << ", dims=" << dims
+                  << ". Falling back to default threads 32,32\n";
+    });
+}
 } // namespace
 
 using mans::h5::safe_malloc;
 
 constexpr std::size_t kMansParamsWords = sizeof(mans::MansParams) / sizeof(unsigned int);
+constexpr std::size_t kMansPublicParamWords = 1;
+constexpr std::uint32_t kDefaultAdmCompressThread = 32;
+constexpr std::uint32_t kDefaultAdmDecompressThread = 32;
 
 static bool parse_mans_params_from_cd(const unsigned int* cd_values,
                                       std::size_t cd_nelmts,
@@ -103,9 +123,70 @@ static bool parse_mans_params_from_cd(const unsigned int* cd_values,
     return true;
 }
 
-static bool threads_all_zero(const mans::MansParams& params) {
-    return params.adm_compress_thread == 0 &&
-           params.adm_decompress_thread == 0;
+static bool parse_public_mode_from_cd(const unsigned int* cd_values,
+                                      std::size_t cd_nelmts,
+                                      std::uint32_t& mode) {
+    if (!cd_values || cd_nelmts < kMansPublicParamWords) {
+        return false;
+    }
+    mode = cd_values[0];
+    return mode == mans::Mode::P || mode == mans::Mode::R;
+}
+
+static bool derive_dtype_from_type(hid_t type_id,
+                                   mans::MansParams& params,
+                                   std::string& error) {
+    if (H5Tget_class(type_id) != H5T_INTEGER) {
+        error = "datatype is not INTEGER";
+        return false;
+    }
+    if (H5Tget_sign(type_id) != H5T_SGN_NONE) {
+        error = "datatype must be unsigned";
+        return false;
+    }
+    const size_t size = H5Tget_size(type_id);
+    if (size == 2) {
+        params.dtype = mans::DataType::U16;
+        return true;
+    }
+    if (size == 4) {
+        params.dtype = mans::DataType::U32;
+        return true;
+    }
+    error = "unsupported integer width";
+    return false;
+}
+
+static bool build_params_for_set_local(hid_t type_id,
+                                       const unsigned int* cd_values,
+                                       std::size_t cd_nelmts,
+                                       mans::MansParams& out,
+                                       bool& params_from_public,
+                                       std::string& error) {
+    params_from_public = false;
+
+    if (cd_nelmts >= kMansParamsWords && parse_mans_params_from_cd(cd_values, cd_nelmts, out)) {
+        out.backend = mans::Backend::CPU;
+        return derive_dtype_from_type(type_id, out, error);
+    }
+
+    std::uint32_t mode = mans::Mode::R;
+    if (!parse_public_mode_from_cd(cd_values, cd_nelmts, mode)) {
+        error = "invalid public filter parameters";
+        return false;
+    }
+
+    out = mans::MansParams{};
+    out.backend = mans::Backend::CPU;
+    out.mode = mode;
+    out.adm_compress_thread = kDefaultAdmCompressThread;
+    out.adm_decompress_thread = kDefaultAdmDecompressThread;
+    if (!derive_dtype_from_type(type_id, out, error)) {
+        return false;
+    }
+
+    params_from_public = true;
+    return true;
 }
 
 static bool apply_dims_from_chunk_dims(const std::vector<hsize_t>& chunk_dims,
@@ -218,10 +299,9 @@ static void apply_effective_dims_for_chunk_elements(std::size_t actual_elements,
 }
 
 // =========================================================
-// set_local: auto-apply thread config based on chunk size
+// set_local: derive internal params and auto-apply thread config
 // =========================================================
 static herr_t H5Z_set_local_mans(hid_t dcpl_id, hid_t type_id, hid_t space_id) {
-    (void)type_id;
     mans::cpu::BufferCache::instance();
 
     const int ndims = H5Sget_simple_extent_ndims(space_id);
@@ -239,8 +319,7 @@ static herr_t H5Z_set_local_mans(hid_t dcpl_id, hid_t type_id, hid_t space_id) {
                              &cd_nelmts, nullptr, 0, nullptr, nullptr) < 0) {
         return 0;
     }
-    const size_t required_params = kMansParamsWords;
-    if (cd_nelmts < required_params) {
+    if (cd_nelmts < kMansPublicParamWords) {
         return 0;
     }
 
@@ -251,10 +330,14 @@ static herr_t H5Z_set_local_mans(hid_t dcpl_id, hid_t type_id, hid_t space_id) {
     }
 
     mans::MansParams params{};
-    if (!parse_mans_params_from_cd(cd_values.data(), cd_nelmts, params)) {
+    bool params_from_public = false;
+    std::string params_error;
+    if (!build_params_for_set_local(type_id, cd_values.data(), cd_nelmts,
+                                    params, params_from_public, params_error)) {
+        std::cerr << "[H5Z-MANS Warning] Failed to build filter params in set_local: "
+                  << params_error << "\n";
         return 0;
     }
-    const bool need_auto_threads = threads_all_zero(params);
 
     std::vector<hsize_t> chunk_dims(static_cast<std::size_t>(ndims), 0);
     if (H5Pget_chunk(dcpl_id, ndims, chunk_dims.data()) < 0) {
@@ -278,18 +361,17 @@ static herr_t H5Z_set_local_mans(hid_t dcpl_id, hid_t type_id, hid_t space_id) {
         }
     }
 
-    const char* csv_env = std::getenv("MANS_THREAD_CSV");
-    std::string csv_path = (csv_env && csv_env[0] != '\0') ? csv_env : "best_threads.csv";
-
-    CsvThreadConfig chosen{};
-    if (need_auto_threads) {
+    if (params_from_public) {
+        const char* csv_env = std::getenv("MANS_THREAD_CSV");
+        std::string csv_path = (csv_env && csv_env[0] != '\0') ? csv_env : "best_threads.csv";
         std::vector<CsvThreadConfig> configs;
         std::string error;
+        CsvThreadConfig chosen{};
         if (!load_thread_csv(csv_path, configs, error)) {
-            std::cerr << "[H5Z-MANS Warning] " << error << "\n";
+            warn_once_thread_csv_fallback(error);
         } else if (!find_nearest_threads(
                        configs, chunk_elements, static_cast<uint32_t>(params.dims), chosen)) {
-            std::cerr << "[H5Z-MANS Warning] No matching thread config found.\n";
+            warn_once_thread_match_fallback(chunk_elements, static_cast<uint32_t>(params.dims));
         } else {
             params.adm_compress_thread = chosen.compress_thread;
             params.adm_decompress_thread = chosen.decompress_thread;
@@ -301,12 +383,10 @@ static herr_t H5Z_set_local_mans(hid_t dcpl_id, hid_t type_id, hid_t space_id) {
         }
     }
 
-    const size_t desired_nelmts = std::max(cd_nelmts, required_params + 1);
+    const size_t desired_nelmts = kMansParamsWords + 1;
     std::vector<unsigned int> out_values(desired_nelmts, 0);
-    std::memcpy(out_values.data(), cd_values.data(),
-                std::min(cd_nelmts, desired_nelmts) * sizeof(unsigned int));
     std::memcpy(out_values.data(), &params, sizeof(mans::MansParams));
-    out_values[required_params] = static_cast<unsigned int>(chunk_elements);
+    out_values[kMansParamsWords] = static_cast<unsigned int>(chunk_elements);
 
     if (H5Pmodify_filter(dcpl_id, H5Z_FILTER_MANS_ID, flags,
                          desired_nelmts, out_values.data()) < 0) {

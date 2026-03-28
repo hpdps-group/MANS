@@ -136,6 +136,24 @@ if(BUILD_CPU)
   target_compile_options(cpu_mans_autotune PRIVATE $<$<CONFIG:Release>:-O3>)
   target_link_libraries(cpu_mans_autotune PRIVATE mans_common mans_cpu_core OpenMP::OpenMP_CXX)
 
+  add_executable(cpu_mans_compress
+    cpu/cpu_mans_compress.cpp
+  )
+  set_target_properties(cpu_mans_compress PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY ${cpu_root_binary_dir}
+  )
+  target_compile_options(cpu_mans_compress PRIVATE $<$<CONFIG:Release>:-O3>)
+  target_link_libraries(cpu_mans_compress PRIVATE mans_common mans_cpu_core OpenMP::OpenMP_CXX)
+
+  add_executable(cpu_mans_decompress
+    cpu/cpu_mans_decompress.cpp
+  )
+  set_target_properties(cpu_mans_decompress PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY ${cpu_root_binary_dir}
+  )
+  target_compile_options(cpu_mans_decompress PRIVATE $<$<CONFIG:Release>:-O3>)
+  target_link_libraries(cpu_mans_decompress PRIVATE mans_common mans_cpu_core OpenMP::OpenMP_CXX)
+
   
   # ========== CPU / pans submodule ==========
   set(cpu_pans_binary_dir ${cpu_root_binary_dir}/pans)
