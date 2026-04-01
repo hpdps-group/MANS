@@ -127,5 +127,16 @@ void decompress_internal(
     const std::string& dump_path
 );
 
+std::size_t get_max_compress_bytes(
+    std::size_t num_elements,
+    const MansParams& params
+);
+
+std::size_t get_exact_decompress_bytes(
+    const void* compressed_data,
+    std::size_t compressed_len,
+    const MansParams& params
+);
+
 }
 }

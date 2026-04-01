@@ -7,8 +7,8 @@
 #include <vector>
 
 #include "mans_cpu.h"
-#include "file_utils.h"
 #include "../mans_defs.h"
+#include "../mans_utils.h"
 
 namespace {
 
@@ -16,30 +16,12 @@ void print_usage(const char* argv0) {
     std::cerr << "Usage: " << argv0 << " <-u2|-u4> <input_file> <output_file>\n";
 }
 
-std::uint64_t read_le64(const std::uint8_t* p) {
-    return static_cast<std::uint64_t>(p[0]) |
-           (static_cast<std::uint64_t>(p[1]) << 8) |
-           (static_cast<std::uint64_t>(p[2]) << 16) |
-           (static_cast<std::uint64_t>(p[3]) << 24) |
-           (static_cast<std::uint64_t>(p[4]) << 32) |
-           (static_cast<std::uint64_t>(p[5]) << 40) |
-           (static_cast<std::uint64_t>(p[6]) << 48) |
-           (static_cast<std::uint64_t>(p[7]) << 56);
-}
-
 bool parse_raw_bytes(const std::vector<std::uint8_t>& input, std::size_t& raw_bytes) {
-    if (input.size() < mans::kMansHeaderBytes) {
-        std::cerr << "Input is too small to be a MANS file.\n";
+    std::string error;
+    if (!mans::parse_mans_raw_bytes(input.data(), input.size(), raw_bytes, &error)) {
+        std::cerr << error << ".\n";
         return false;
     }
-    mans::MansHeader header{};
-    std::memcpy(&header, input.data(), sizeof(header));
-    const std::uint64_t raw = read_le64(header.raw_bytes_le);
-    if (raw == 0 || raw > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
-        std::cerr << "Invalid raw byte size in MANS header.\n";
-        return false;
-    }
-    raw_bytes = static_cast<std::size_t>(raw);
     return true;
 }
 
@@ -48,11 +30,11 @@ bool save_output_file(const std::string& path, const std::vector<std::uint8_t>& 
     if constexpr (std::is_same<T, std::uint16_t>::value) {
         std::vector<std::uint16_t> typed(bytes.size() / sizeof(std::uint16_t));
         std::memcpy(typed.data(), bytes.data(), bytes.size());
-        return save_u16_file(path, typed);
+        return mans::save_u16_file(path, typed);
     } else {
         std::vector<std::uint32_t> typed(bytes.size() / sizeof(std::uint32_t));
         std::memcpy(typed.data(), bytes.data(), bytes.size());
-        return save_u32_file(path, typed);
+        return mans::save_u32_file(path, typed);
     }
 }
 
@@ -61,7 +43,7 @@ bool run_decompress(const std::string& input_file,
                     const std::string& output_file,
                     mans::MansParams params) {
     std::vector<std::uint8_t> input;
-    if (!load_u8_file(input_file, input)) {
+    if (!mans::load_u8_file(input_file, input)) {
         std::cerr << "Failed to load input file: " << input_file << "\n";
         return false;
     }

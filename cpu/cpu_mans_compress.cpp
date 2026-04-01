@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "mans_cpu.h"
-#include "file_utils.h"
+#include "../mans_utils.h"
 #include "adm/adm_utils.h"
 #include "fse/include/fse.h"
 #include "../mans_defs.h"
@@ -65,9 +65,9 @@ bool dims_product(const std::vector<std::uint32_t>& dims, std::size_t& out) {
 template <typename T>
 bool load_input_file(const std::string& path, std::vector<T>& input) {
     if constexpr (std::is_same<T, std::uint16_t>::value) {
-        return load_u16_file(path, input);
+        return mans::load_u16_file(path, input);
     } else {
-        return load_u32_file(path, input);
+        return mans::load_u32_file(path, input);
     }
 }
 
@@ -142,7 +142,7 @@ bool run_compress(const std::string& input_file,
     }
 
     output.resize(output_size);
-    if (!save_u8_file(output_file, output)) {
+    if (!mans::save_u8_file(output_file, output)) {
         std::cerr << "Failed to write output file: " << output_file << "\n";
         return false;
     }

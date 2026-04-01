@@ -1,5 +1,5 @@
 #include "mans_cpu.h"
-#include "file_utils.h"
+#include "../mans_utils.h"
 #include "../mans_api.hpp"
 #include "../mans_defs.h"
 #include "../mans_timing.h"
@@ -488,7 +488,7 @@ int main(int argc, char** argv) {
 
     if (is_u2) {
         std::vector<std::uint16_t> input;
-        if (!load_u16_file(input_path, input)) {
+        if (!mans::load_u16_file(input_path, input)) {
             std::cerr << "Failed to load input file: " << input_path << "\n";
             return 1;
         }
@@ -527,7 +527,7 @@ int main(int argc, char** argv) {
                                                  bench_iters);
     } else {
         std::vector<std::uint32_t> input;
-        if (!load_u32_file(input_path, input)) {
+        if (!mans::load_u32_file(input_path, input)) {
             std::cerr << "Failed to load input file: " << input_path << "\n";
             return 1;
         }

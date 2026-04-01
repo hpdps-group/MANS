@@ -9,8 +9,12 @@
 
 #include "adm/adm_utils.h"
 #include "pans/pans_utils.h"
+#include "pans/CpuANSUtils.h"
 #include "fse/fse_utils.h"
-#include "file_utils.h"
+extern "C" {
+#include "fse/include/fse.h"
+}
+#include "../mans_utils.h"
 #include "buffer_cache.h"
 #include "../mans_timing.h"
 #define DEBUG_PRINT(msg) \
@@ -30,72 +34,15 @@ static std::uint32_t normalize_mode(std::uint32_t mode) {
 // 2. Decompress Helper Function
 // ==========================================
 
-inline std::uint64_t read_le64(const std::uint8_t* p) {
-    return static_cast<std::uint64_t>(p[0]) |
-           (static_cast<std::uint64_t>(p[1]) << 8) |
-           (static_cast<std::uint64_t>(p[2]) << 16) |
-           (static_cast<std::uint64_t>(p[3]) << 24) |
-           (static_cast<std::uint64_t>(p[4]) << 32) |
-           (static_cast<std::uint64_t>(p[5]) << 40) |
-           (static_cast<std::uint64_t>(p[6]) << 48) |
-           (static_cast<std::uint64_t>(p[7]) << 56);
-}
-
-inline void write_le64(std::uint8_t* p, std::uint64_t v) {
-    p[0] = static_cast<std::uint8_t>(v & 0xFFu);
-    p[1] = static_cast<std::uint8_t>((v >> 8) & 0xFFu);
-    p[2] = static_cast<std::uint8_t>((v >> 16) & 0xFFu);
-    p[3] = static_cast<std::uint8_t>((v >> 24) & 0xFFu);
-    p[4] = static_cast<std::uint8_t>((v >> 32) & 0xFFu);
-    p[5] = static_cast<std::uint8_t>((v >> 40) & 0xFFu);
-    p[6] = static_cast<std::uint8_t>((v >> 48) & 0xFFu);
-    p[7] = static_cast<std::uint8_t>((v >> 56) & 0xFFu);
-}
-
 static bool parse_header(const uint8_t* data,
                          size_t length,
                          MansHeader& out_header,
                          std::size_t& out_raw_bytes) {
-    if (length < kMansHeaderBytes) {
-        std::cerr << "[Error] File too small, invalid mans format.\n";
+    std::string error;
+    if (!mans::parse_mans_header(data, length, out_header, out_raw_bytes, &error)) {
+        std::cerr << "[Error] " << error << ".\n";
         return false;
     }
-
-    MansHeader header{};
-    std::memcpy(&header, data, sizeof(header));
-    out_header = header;
-
-    if (header.codec != 1 && header.codec != 2) {
-        std::cerr << "[Error] Unknown codec type: " << int(header.codec) << "\n";
-        return false;
-    }
-    if (header.mode != Mode::P && header.mode != Mode::R) {
-        std::cerr << "[Error] Unknown mode in header: " << int(header.mode) << "\n";
-        return false;
-    }
-    if (header.dims < 1 || header.dims > 3) {
-        std::cerr << "[Error] Invalid dims in header: " << int(header.dims) << "\n";
-        return false;
-    }
-    const std::uint64_t u32_max = static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max());
-    if (header.nx == 0 || header.nx > u32_max) {
-        std::cerr << "[Error] Invalid nx in header: " << header.nx << "\n";
-        return false;
-    }
-    if (header.dims >= 2 && (header.ny == 0 || header.ny > u32_max)) {
-        std::cerr << "[Error] Invalid ny in header: " << header.ny << "\n";
-        return false;
-    }
-    if (header.dims == 3 && (header.nz == 0 || header.nz > u32_max)) {
-        std::cerr << "[Error] Invalid nz in header: " << header.nz << "\n";
-        return false;
-    }
-    const std::uint64_t raw_bytes_u64 = read_le64(header.raw_bytes_le);
-    if (raw_bytes_u64 > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
-        std::cerr << "[Error] raw size overflows size_t.\n";
-        return false;
-    }
-    out_raw_bytes = static_cast<std::size_t>(raw_bytes_u64);
     return true;
 }
 
@@ -158,7 +105,7 @@ void do_compress_t(
                 std::vector<std::uint8_t> tmp(
                     mans_intermediate_buf_local,
                     mans_intermediate_buf_local + adm_size);
-                save_u8_file(dump_path, tmp);
+                mans::save_u8_file(dump_path, tmp);
             }
 
             stage2_in_ptr = mans_intermediate_buf_local;
@@ -192,7 +139,7 @@ void do_compress_t(
         header.codec = codec_code;
         header.mode = static_cast<std::uint8_t>(mode);
         header.dims = static_cast<std::uint8_t>(params.dims);
-        write_le64(header.raw_bytes_le, static_cast<std::uint64_t>(raw_bytes));
+        mans::write_le64(header.raw_bytes_le, static_cast<std::uint64_t>(raw_bytes));
         header.nx = static_cast<std::uint64_t>(params.nx);
         header.ny = static_cast<std::uint64_t>(params.ny);
         header.nz = static_cast<std::uint64_t>(params.nz);
@@ -330,7 +277,7 @@ void do_decompress_t(
             // ADM Mode
             if (save_adm && !dump_path.empty()) {
                 std::vector<std::uint8_t> tmp(stage2_dec_buf, stage2_dec_buf + stage2_decomp_len);
-                save_u8_file(dump_path, tmp);
+                mans::save_u8_file(dump_path, tmp);
             }
             if (stage2_decomp_len < sizeof(adm::FileHeader)) {
                 std::cerr << "[Error] ADM payload is too small.\n";
@@ -444,6 +391,79 @@ void decompress_internal(
             ptr, length, out, out_size, params, save_adm, dump_path
         );
     }
+}
+
+
+std::size_t get_max_compress_bytes(std::size_t num_elements, const MansParams& params) {
+    if (num_elements == 0) {
+        return 0;
+    }
+
+    std::size_t elem_size = 0;
+    if (!mans::get_dtype_size(params.dtype, elem_size)) {
+        throw std::runtime_error("mans::cpu::get_max_compress_bytes: Unsupported dtype.");
+    }
+
+    const std::size_t max_u32 = std::numeric_limits<std::uint32_t>::max();
+    if (num_elements > max_u32 / elem_size) {
+        throw std::runtime_error("mans::cpu::get_max_compress_bytes: raw_bytes exceeds 32-bit limit.");
+    }
+    const std::size_t raw_bytes = num_elements * elem_size;
+    if (raw_bytes > max_u32) {
+        throw std::runtime_error("mans::cpu::get_max_compress_bytes: raw_bytes exceeds 32-bit limit.");
+    }
+
+    std::size_t adm_bytes = 0;
+    if (params.dtype == DataType::U16) {
+        adm_bytes = adm_max_compressed_size<std::uint16_t>(num_elements);
+    } else {
+        adm_bytes = adm_max_compressed_size<std::uint32_t>(num_elements);
+    }
+    if (adm_bytes > max_u32) {
+        throw std::runtime_error("mans::cpu::get_max_compress_bytes: adm_bytes exceeds 32-bit limit.");
+    }
+
+    const std::size_t pans_raw =
+        static_cast<std::size_t>(cpu_ans::getMaxCompressedSize(static_cast<std::uint32_t>(raw_bytes)));
+    const std::size_t pans_adm =
+        static_cast<std::size_t>(cpu_ans::getMaxCompressedSize(static_cast<std::uint32_t>(adm_bytes)));
+    const std::size_t fse_raw = FSE_compressBound(raw_bytes);
+    const std::size_t fse_adm = FSE_compressBound(adm_bytes);
+    if (fse_raw == 0 || fse_adm == 0) {
+        throw std::runtime_error("mans::cpu::get_max_compress_bytes: FSE_compressBound overflow.");
+    }
+
+    const std::uint32_t mode = normalize_mode(params.mode);
+    if (mode == Mode::P) {
+        return kMansHeaderBytes + std::max(pans_raw, pans_adm);
+    }
+    if (mode == Mode::R) {
+        return kMansHeaderBytes + std::max(fse_raw, fse_adm);
+    }
+    throw std::runtime_error("mans::cpu::get_max_compress_bytes: Unknown mode.");
+}
+
+std::size_t get_exact_decompress_bytes(const void* compressed_data,
+                                       std::size_t compressed_len,
+                                       const MansParams& params) {
+    if (compressed_len <= kMansHeaderBytes) {
+        throw std::runtime_error("mans::cpu::get_exact_decompress_bytes: missing payload.");
+    }
+
+    std::size_t raw_bytes = 0;
+    std::string parse_error;
+    if (!mans::parse_mans_raw_bytes(compressed_data, compressed_len, raw_bytes, &parse_error)) {
+        throw std::runtime_error("mans::cpu::get_exact_decompress_bytes: " + parse_error + ".");
+    }
+
+    std::size_t elem_size = 0;
+    if (!mans::get_dtype_size(params.dtype, elem_size)) {
+        throw std::runtime_error("mans::cpu::get_exact_decompress_bytes: Unsupported dtype.");
+    }
+    if (raw_bytes % elem_size != 0) {
+        throw std::runtime_error("mans::cpu::get_exact_decompress_bytes: invalid raw size in header.");
+    }
+    return raw_bytes;
 }
 
 } // namespace cpu
