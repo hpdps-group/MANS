@@ -1,10 +1,9 @@
 #include <cstdint>
 #include <iostream>
-#include <limits>
 #include <string>
 #include <vector>
 
-#include "mans_cpu.h"
+#include "../mans_api.hpp"
 #include "../mans_utils.h"
 
 namespace {
@@ -43,9 +42,7 @@ bool run_decompress(const std::string& input_file,
 
     std::vector<std::uint8_t> output(raw_bytes);
     std::size_t output_size = output.size();
-    mans::cpu::decompress_internal(input.data(), input.size(), params,
-                                   output.data(), output_size,
-                                   false, std::string());
+    mans::decompress(input.data(), input.size(), params, output.data(), output_size);
     if (output_size == 0) {
         std::cerr << "Decompression failed.\n";
         return false;
@@ -65,7 +62,7 @@ bool run_decompress(const std::string& input_file,
     return true;
 }
 
-}  // namespace
+} // namespace
 
 int main(int argc, char** argv) {
     if (argc != 4) {
@@ -82,7 +79,7 @@ int main(int argc, char** argv) {
     }
 
     mans::MansParams params{};
-    params.backend = mans::Backend::CPU;
+    params.backend = mans::Backend::NVIDIA;
     params.dtype = is_u2 ? mans::DataType::U16 : mans::DataType::U32;
 
     const std::string input_file = argv[2];

@@ -1,7 +1,9 @@
 #pragma once
 
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -116,6 +118,89 @@ inline bool save_u16_file(const std::string& filename, const std::vector<std::ui
 
 inline bool save_u32_file(const std::string& filename, const std::vector<std::uint32_t>& data) {
     return save_file(filename, data);
+}
+
+template <typename T>
+inline bool load_typed_file(const std::string& filename, std::vector<T>& data) {
+    if constexpr (std::is_same_v<T, std::uint8_t>) {
+        return load_u8_file(filename, data);
+    } else if constexpr (std::is_same_v<T, std::uint16_t>) {
+        return load_u16_file(filename, data);
+    } else if constexpr (std::is_same_v<T, std::uint32_t>) {
+        return load_u32_file(filename, data);
+    } else {
+        static_assert(std::is_same_v<T, void>, "load_typed_file only supports uint8_t/uint16_t/uint32_t");
+    }
+}
+
+template <typename T>
+inline bool save_typed_file(const std::string& filename, const std::vector<T>& data) {
+    if constexpr (std::is_same_v<T, std::uint8_t>) {
+        return save_u8_file(filename, data);
+    } else if constexpr (std::is_same_v<T, std::uint16_t>) {
+        return save_u16_file(filename, data);
+    } else if constexpr (std::is_same_v<T, std::uint32_t>) {
+        return save_u32_file(filename, data);
+    } else {
+        static_assert(std::is_same_v<T, void>, "save_typed_file only supports uint8_t/uint16_t/uint32_t");
+    }
+}
+
+
+template <typename T>
+inline bool save_typed_bytes_file(const std::string& filename,
+                                  const std::vector<std::uint8_t>& bytes) {
+    static_assert(std::is_same_v<T, std::uint16_t> || std::is_same_v<T, std::uint32_t>,
+                  "save_typed_bytes_file only supports uint16_t/uint32_t");
+
+    if ((bytes.size() % sizeof(T)) != 0) {
+        return false;
+    }
+
+    std::vector<T> typed(bytes.size() / sizeof(T));
+    std::memcpy(typed.data(), bytes.data(), bytes.size());
+    return save_typed_file(filename, typed);
+}
+
+inline bool parse_positive_u32(const char* text, std::uint32_t& out) {
+    if (!text || *text == '\0') {
+        return false;
+    }
+    char* end = nullptr;
+    errno = 0;
+    const unsigned long long value = std::strtoull(text, &end, 10);
+    if (errno != 0 || end == nullptr || *end != '\0' || value == 0 ||
+        value > static_cast<unsigned long long>(std::numeric_limits<std::uint32_t>::max())) {
+        return false;
+    }
+    out = static_cast<std::uint32_t>(value);
+    return true;
+}
+
+inline bool parse_mode(const char* text, std::uint32_t& out) {
+    if (std::strcmp(text, "p") == 0 || std::strcmp(text, "P") == 0) {
+        out = Mode::P;
+        return true;
+    }
+    if (std::strcmp(text, "r") == 0 || std::strcmp(text, "R") == 0) {
+        out = Mode::R;
+        return true;
+    }
+    return false;
+}
+
+inline bool dims_product(const std::vector<std::uint32_t>& dims, std::size_t& out) {
+    out = 1;
+    for (std::uint32_t dim : dims) {
+        if (dim == 0) {
+            return false;
+        }
+        if (out > std::numeric_limits<std::size_t>::max() / static_cast<std::size_t>(dim)) {
+            return false;
+        }
+        out *= static_cast<std::size_t>(dim);
+    }
+    return true;
 }
 
 inline std::uint32_t read_le32(const std::uint8_t* p) {

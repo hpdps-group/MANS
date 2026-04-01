@@ -8,6 +8,22 @@
 namespace mans {
 
 
+void compress_device(
+    const void* input_data,
+    size_t length,
+    const MansParams& params,
+    uint8_t* out,
+    size_t& out_size
+);
+
+void decompress_device(
+    const void* input_data,
+    size_t length,
+    const MansParams& params,
+    uint8_t* out,
+    size_t& out_size
+);
+
 void compress(
     const void* input_data,
     size_t length,

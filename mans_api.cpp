@@ -7,10 +7,42 @@
 #endif
 
 #ifdef MANS_ENABLE_NV
-// #include "nv/mans_nv.h"
+#include "nv/mans_nv.h"
 #endif
 
 namespace mans {
+
+void compress_device(const void* input_data,
+                     size_t length,
+                     const MansParams& params,
+                     uint8_t* out,
+                     size_t& out_size) {
+    if (params.backend != Backend::NVIDIA) {
+        throw std::runtime_error("MANS::compress_device: only the NVIDIA backend is supported.");
+    }
+#ifdef MANS_ENABLE_NV
+    mans::nv::compress_internal_device(input_data, length, params, out, out_size);
+    return;
+#else
+    throw std::runtime_error("MANS::compress_device: NVIDIA backend was NOT compiled.");
+#endif
+}
+
+void decompress_device(const void* input_data,
+                       size_t length,
+                       const MansParams& params,
+                       uint8_t* out,
+                       size_t& out_size) {
+    if (params.backend != Backend::NVIDIA) {
+        throw std::runtime_error("MANS::decompress_device: only the NVIDIA backend is supported.");
+    }
+#ifdef MANS_ENABLE_NV
+    mans::nv::decompress_internal_device(input_data, length, params, out, out_size);
+    return;
+#else
+    throw std::runtime_error("MANS::decompress_device: NVIDIA backend was NOT compiled.");
+#endif
+}
 
 void compress(const void* input_data,
               size_t length,
@@ -28,8 +60,8 @@ void compress(const void* input_data,
 
     if (params.backend == Backend::NVIDIA) {
 #ifdef MANS_ENABLE_NV
-        // mans::nv::compress_internal(input_data, length, params, out, out_size, false, "");
-        throw std::runtime_error("MANS::compress: NVIDIA backend not implemented yet.");
+        mans::nv::compress_internal(input_data, length, params, out, out_size, false, "");
+        return;
 #else
         throw std::runtime_error("MANS::compress: NVIDIA backend was NOT compiled.");
 #endif
@@ -54,8 +86,8 @@ void decompress(const void* input_data,
 
     if (params.backend == Backend::NVIDIA) {
 #ifdef MANS_ENABLE_NV
-        // mans::nv::decompress_internal(input_data, length, params, out, out_size, false, "");
-        throw std::runtime_error("MANS::decompress: NVIDIA backend not implemented yet.");
+        mans::nv::decompress_internal(input_data, length, params, out, out_size, false, "");
+        return;
 #else
         throw std::runtime_error("MANS::decompress: NVIDIA backend was NOT compiled.");
 #endif
@@ -75,7 +107,7 @@ std::size_t get_mans_max_compress_bytes(std::size_t num_elements, const MansPara
 
     if (params.backend == Backend::NVIDIA) {
 #ifdef MANS_ENABLE_NV
-        throw std::runtime_error("MANS::get_mans_max_compress_bytes: NVIDIA backend not implemented yet.");
+        return mans::nv::get_max_compress_bytes(num_elements, params);
 #else
         throw std::runtime_error("MANS::get_mans_max_compress_bytes: NVIDIA backend was NOT compiled.");
 #endif
@@ -97,7 +129,7 @@ std::size_t get_mans_exact_decompress_bytes(const void* compressed_data,
 
     if (params.backend == Backend::NVIDIA) {
 #ifdef MANS_ENABLE_NV
-        throw std::runtime_error("MANS::get_mans_exact_decompress_bytes: NVIDIA backend not implemented yet.");
+        return mans::nv::get_exact_decompress_bytes(compressed_data, compressed_len, params);
 #else
         throw std::runtime_error("MANS::get_mans_exact_decompress_bytes: NVIDIA backend was NOT compiled.");
 #endif

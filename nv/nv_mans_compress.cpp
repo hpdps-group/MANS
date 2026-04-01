@@ -4,10 +4,8 @@
 #include <string>
 #include <vector>
 
-#include "mans_cpu.h"
+#include "../mans_api.hpp"
 #include "../mans_utils.h"
-#include "adm/adm_utils.h"
-#include "fse/include/fse.h"
 
 namespace {
 
@@ -56,31 +54,10 @@ bool run_compress(const std::string& input_file,
     params.ny = dims.size() >= 2 ? dims[1] : 0;
     params.nz = dims.size() >= 3 ? dims[2] : 0;
 
-    const std::size_t adm_cap = adm_max_compressed_size<T>(input.size());
-    std::size_t stage2_cap = adm_cap * 2 + 4096;
-    if (params.mode == mans::Mode::R) {
-        const std::size_t fse_bound = FSE_compressBound(adm_cap);
-        if (fse_bound > 0) {
-            stage2_cap = fse_bound;
-        }
-    } else {
-        stage2_cap = adm_cap + adm_cap / 2 + 4096;
-    }
-    if (stage2_cap < adm_cap) {
-        std::cerr << "Compressed-size estimate overflow.\n";
-        return false;
-    }
-    const std::size_t output_cap = mans::kMansHeaderBytes + stage2_cap;
-    if (output_cap < stage2_cap) {
-        std::cerr << "Compressed-size estimate overflow.\n";
-        return false;
-    }
-
+    const std::size_t output_cap = mans::get_mans_max_compress_bytes(input.size(), params);
     std::vector<std::uint8_t> output(output_cap);
     std::size_t output_size = output.size();
-    mans::cpu::compress_internal(input.data(), input.size(), params,
-                                 output.data(), output_size,
-                                 false, std::string());
+    mans::compress(input.data(), input.size(), params, output.data(), output_size);
     if (output_size == 0) {
         std::cerr << "Compression failed.\n";
         return false;
@@ -99,7 +76,7 @@ bool run_compress(const std::string& input_file,
     return true;
 }
 
-}  // namespace
+} // namespace
 
 int main(int argc, char** argv) {
     if (argc < 4) {
@@ -119,9 +96,9 @@ int main(int argc, char** argv) {
     const std::string output_file = argv[3];
 
     mans::MansParams params{};
-    params.backend = mans::Backend::CPU;
+    params.backend = mans::Backend::NVIDIA;
     params.dtype = is_u2 ? mans::DataType::U16 : mans::DataType::U32;
-    params.mode = mans::Mode::R;
+    params.mode = mans::Mode::P;
 
     std::vector<std::uint32_t> dims;
     for (int i = 4; i < argc; ++i) {
