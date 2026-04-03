@@ -175,6 +175,7 @@ if(BUILD_NV)
     nv/adm/mapping_uint16.cu
     nv/adm/mapping_uint32.cu
     nv/ans/mans_nv_ans.cu
+    nv/ans/src/GpuANS.cu
   )
   set_property(TARGET mans_nv_core PROPERTY POSITION_INDEPENDENT_CODE ON)
   set_target_properties(mans_nv_core PROPERTIES
@@ -182,7 +183,11 @@ if(BUILD_NV)
       CUDA_SEPARABLE_COMPILATION ON
       CUDA_RESOLVE_DEVICE_SYMBOLS ON
   )
-  target_include_directories(mans_nv_core PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
+  target_include_directories(mans_nv_core PUBLIC
+      ${CUDAToolkit_INCLUDE_DIRS}
+      ${CMAKE_CURRENT_SOURCE_DIR}/nv/ans/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/nv/ans/src
+  )
   target_link_libraries(mans_nv_core PUBLIC CUDA::cudart)
   target_link_libraries(mans_common PRIVATE mans_nv_core)
   include(FindCUDA/select_compute_arch)
