@@ -85,7 +85,7 @@ bool run_compress(const std::string& input_file,
     params.ny = dims.size() >= 2 ? dims[1] : 0;
     params.nz = dims.size() >= 3 ? dims[2] : 0;
 
-    std::size_t max_buffer_size = adm_max_compressed_size<T>(input_data.size());
+    std::size_t max_buffer_size = adm_max_compressed_size<T>(input_data.size(), params);
     max_buffer_size += 1024;
 
     std::vector<std::uint8_t> output(max_buffer_size);

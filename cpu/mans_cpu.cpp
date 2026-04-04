@@ -83,7 +83,7 @@ void do_compress_t(
     const std::size_t raw_bytes = length * sizeof(T);
 
     try {
-            adm_cap = adm_max_compressed_size<T>(length);
+            adm_cap = adm_max_compressed_size<T>(length, params);
             mans_intermediate_buf_local =
                 mans::cpu::BufferCache::instance().get_t<std::uint8_t>(
                     "mans_adm_intermediate", adm_cap);
@@ -279,35 +279,20 @@ void do_decompress_t(
                 std::vector<std::uint8_t> tmp(stage2_dec_buf, stage2_dec_buf + stage2_decomp_len);
                 mans::save_u8_file(dump_path, tmp);
             }
-            if (stage2_decomp_len < sizeof(adm::FileHeader)) {
-                std::cerr << "[Error] ADM payload is too small.\n";
-                return;
-            }
-            const auto* hdr = reinterpret_cast<const adm::FileHeader*>(stage2_dec_buf);
-            if (hdr->num_elements >
-                std::numeric_limits<std::size_t>::max() / sizeof(T)) {
-                std::cerr << "[Error] ADM output size overflow.\n";
-                return;
-            }
-            const std::size_t expected_bytes =
-                static_cast<std::size_t>(hdr->num_elements) * sizeof(T);
-            if (expected_bytes != raw_bytes) {
-                std::cerr << "[Error] Raw size mismatch between mans header and ADM header.\n";
-                return;
-            }
+            const std::size_t num_elements = raw_bytes / sizeof(T);
+            const std::size_t expected_bytes = num_elements * sizeof(T);
             if (expected_bytes > out_capacity) {
                 std::cerr << "[Error] Output buffer too small for ADM payload.\n";
                 return;
             }
             T* recovered = reinterpret_cast<T*>(final_out);
-            std::size_t num_elements = 0;
 
             {
                 MANS_TIMING_SCOPE("adm_decompress");
                 adm_decompress<T>(stage2_dec_buf, stage2_decomp_len, recovered,
                                   num_elements, effective_params);
             }
-            final_out_size = num_elements * sizeof(T);
+            final_out_size = expected_bytes;
             if (final_out_size != raw_bytes) {
                 std::cerr << "[Error] Raw size mismatch after ADM decompression.\n";
                 final_out_size = 0;
@@ -415,9 +400,9 @@ std::size_t get_max_compress_bytes(std::size_t num_elements, const MansParams& p
 
     std::size_t adm_bytes = 0;
     if (params.dtype == DataType::U16) {
-        adm_bytes = adm_max_compressed_size<std::uint16_t>(num_elements);
+        adm_bytes = adm_max_compressed_size<std::uint16_t>(num_elements, params);
     } else {
-        adm_bytes = adm_max_compressed_size<std::uint32_t>(num_elements);
+        adm_bytes = adm_max_compressed_size<std::uint32_t>(num_elements, params);
     }
     if (adm_bytes > max_u32) {
         throw std::runtime_error("mans::cpu::get_max_compress_bytes: adm_bytes exceeds 32-bit limit.");

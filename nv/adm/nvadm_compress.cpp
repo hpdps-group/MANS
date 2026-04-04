@@ -10,6 +10,7 @@
 
 #include "mapping_uint16.h"
 #include "mapping_uint32.h"
+#include "../../mans_defs.h"
 #include "../../mans_utils.h"
 
 namespace {
@@ -47,12 +48,20 @@ bool run_compress(const std::string& input_file,
     }
 
     try {
+        mans::MansParams params{};
+        params.backend = mans::Backend::NVIDIA;
+        params.dtype = std::is_same_v<T, std::uint16_t> ? mans::DataType::U16 : mans::DataType::U32;
+        params.dims = static_cast<std::uint32_t>(dims.size());
+        params.nx = dims.size() >= 1 ? dims[0] : 0;
+        params.ny = dims.size() >= 2 ? dims[1] : 0;
+        params.nz = dims.size() >= 3 ? dims[2] : 0;
+
         T* d_input = nullptr;
         std::uint8_t* d_output = nullptr;
         const std::size_t input_bytes = input_data.size() * sizeof(T);
         const std::size_t max_output_size = std::is_same_v<T, std::uint16_t>
-            ? mans::nv::adm::get_max_u16_payload_bytes(input_data.size())
-            : mans::nv::adm::get_max_u32_payload_bytes(input_data.size());
+            ? mans::nv::adm::get_max_u16_payload_bytes(input_data.size(), params)
+            : mans::nv::adm::get_max_u32_payload_bytes(input_data.size(), params);
         std::size_t output_size = 0;
 
         if (input_bytes != 0) {
@@ -65,9 +74,9 @@ bool run_compress(const std::string& input_file,
         }
 
         if constexpr (std::is_same_v<T, std::uint16_t>) {
-            mans::nv::adm::compress_u16_device(d_input, input_data.size(), d_output, output_size);
+            mans::nv::adm::compress_u16_device(d_input, input_data.size(), params, d_output, output_size);
         } else {
-            mans::nv::adm::compress_u32_device(d_input, input_data.size(), d_output, output_size);
+            mans::nv::adm::compress_u32_device(d_input, input_data.size(), params, d_output, output_size);
         }
 
         std::vector<std::uint8_t> output(output_size);

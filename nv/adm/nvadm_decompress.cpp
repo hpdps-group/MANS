@@ -10,6 +10,7 @@
 
 #include "mapping_uint16.h"
 #include "mapping_uint32.h"
+#include "../../mans_defs.h"
 #include "../../mans_utils.h"
 
 namespace {
@@ -36,6 +37,14 @@ bool run_decompress(const std::vector<std::uint8_t>& input,
     }
 
     try {
+        mans::MansParams params{};
+        params.backend = mans::Backend::NVIDIA;
+        params.dtype = std::is_same_v<T, std::uint16_t> ? mans::DataType::U16 : mans::DataType::U32;
+        params.dims = static_cast<std::uint32_t>(dims.size());
+        params.nx = dims.size() >= 1 ? dims[0] : 0;
+        params.ny = dims.size() >= 2 ? dims[1] : 0;
+        params.nz = dims.size() >= 3 ? dims[2] : 0;
+
         std::uint8_t* d_input = nullptr;
         T* d_output = nullptr;
         const std::size_t input_bytes = input.size();
@@ -51,9 +60,9 @@ bool run_decompress(const std::vector<std::uint8_t>& input,
         }
 
         if constexpr (std::is_same_v<T, std::uint16_t>) {
-            mans::nv::adm::decompress_u16_device(d_input, input.size(), d_output, total_elements);
+            mans::nv::adm::decompress_u16_device(d_input, input.size(), d_output, total_elements, params);
         } else {
-            mans::nv::adm::decompress_u32_device(d_input, input.size(), d_output, total_elements);
+            mans::nv::adm::decompress_u32_device(d_input, input.size(), d_output, total_elements, params);
         }
 
         std::vector<T> output(total_elements);

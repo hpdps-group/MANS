@@ -56,7 +56,7 @@ bool run_compress(const std::string& input_file,
     params.ny = dims.size() >= 2 ? dims[1] : 0;
     params.nz = dims.size() >= 3 ? dims[2] : 0;
 
-    const std::size_t adm_cap = adm_max_compressed_size<T>(input.size());
+    const std::size_t adm_cap = adm_max_compressed_size<T>(input.size(), params);
     std::size_t stage2_cap = adm_cap * 2 + 4096;
     if (params.mode == mans::Mode::R) {
         const std::size_t fse_bound = FSE_compressBound(adm_cap);

@@ -74,12 +74,11 @@ bool run_decompress(const std::vector<std::uint8_t>& merged,
     params.nz = dims.size() >= 3 ? dims[2] : 0;
 
     std::vector<T> recovered(num_elements);
-    std::size_t recovered_elements = num_elements;
     adm_decompress_and_benchmark<T>(
         merged.data(),
         merged.size(),
         recovered.data(),
-        recovered_elements,
+        num_elements,
         params
     );
 
@@ -153,14 +152,11 @@ int main(int argc, char** argv) {
         std::cerr << "Failed to load input file: " << input_file << "\n";
         return 1;
     }
-    if (merged.size() < sizeof(adm::FileHeader)) {
-        std::cerr << "Error: File too small or invalid format.\n";
+    std::size_t num_elements = 0;
+    if (!dims_product(dims, num_elements)) {
+        std::cerr << "Invalid --dims values.\n";
         return 1;
     }
-
-    adm::FileHeader header;
-    std::memcpy(&header, merged.data(), sizeof(header));
-    std::size_t num_elements = static_cast<std::size_t>(header.num_elements);
 
     mans::MansParams params{};
 

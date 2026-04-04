@@ -55,11 +55,11 @@ void compress_adm_payload_device(const void* d_input_data,
     switch (params.dtype) {
         case DataType::U16:
             mans::nv::adm::compress_u16_device(
-                static_cast<const std::uint16_t*>(d_input_data), num_elements, d_output, output_size, stream);
+                static_cast<const std::uint16_t*>(d_input_data), num_elements, params, d_output, output_size, stream);
             return;
         case DataType::U32:
             mans::nv::adm::compress_u32_device(
-                static_cast<const std::uint32_t*>(d_input_data), num_elements, d_output, output_size, stream);
+                static_cast<const std::uint32_t*>(d_input_data), num_elements, params, d_output, output_size, stream);
             return;
         default:
             throw std::runtime_error("mans::nv::compress_internal_device: Unsupported dtype.");
@@ -88,11 +88,11 @@ void decompress_adm_payload_device(const std::uint8_t* d_input,
     switch (params.dtype) {
         case DataType::U16:
             mans::nv::adm::decompress_u16_device(
-                d_input, input_size, reinterpret_cast<std::uint16_t*>(d_output), num_elements, stream);
+                d_input, input_size, reinterpret_cast<std::uint16_t*>(d_output), num_elements, params, stream);
             return;
         case DataType::U32:
             mans::nv::adm::decompress_u32_device(
-                d_input, input_size, reinterpret_cast<std::uint32_t*>(d_output), num_elements, stream);
+                d_input, input_size, reinterpret_cast<std::uint32_t*>(d_output), num_elements, params, stream);
             return;
         default:
             throw std::runtime_error("mans::nv::decompress_internal_device: Unsupported dtype.");
@@ -103,9 +103,9 @@ std::size_t get_max_adm_payload_bytes(std::size_t num_elements,
                                       const MansParams& params) {
     switch (params.dtype) {
         case DataType::U16:
-            return mans::nv::adm::get_max_u16_payload_bytes(num_elements);
+            return mans::nv::adm::get_max_u16_payload_bytes(num_elements, params);
         case DataType::U32:
-            return mans::nv::adm::get_max_u32_payload_bytes(num_elements);
+            return mans::nv::adm::get_max_u32_payload_bytes(num_elements, params);
         default:
             throw std::runtime_error("mans::nv::get_max_compress_bytes: Unsupported dtype.");
     }

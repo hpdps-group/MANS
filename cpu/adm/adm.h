@@ -40,18 +40,6 @@ inline constexpr int max_bytes_signal_per_ele_32b = 3;
 inline constexpr int warp_size = 32;
 inline constexpr int threshold = 3500;
 
-// ------------- header -------------
-// record metadata
-struct FileHeader {
-    std::uint64_t num_elements; // uint16 elements num
-    std::uint64_t gsize;        // warp = ceil(num / (cmp_tblock_size * cmp_chunk))
-    std::size_t len1;
-    std::size_t len2;
-    std::size_t len3;
-    std::size_t len4;    
-
-};
-
 // inline void compress_uint16(
 //     const uint16_t* input_data,
 //     size_t input_len,
